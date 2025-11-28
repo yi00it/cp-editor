@@ -39,6 +39,8 @@ pub enum InputMode {
     Replace,
     /// Go to line mode (Ctrl+G).
     GoToLine,
+    /// Rename symbol mode (F2).
+    Rename,
 }
 
 /// Pending dialog action after unsaved changes confirmation.
@@ -80,6 +82,8 @@ pub struct EditorApp {
     pub replace_text: String,
     /// Go to line text.
     pub goto_text: String,
+    /// Rename symbol text.
+    pub rename_text: String,
     /// Which input field is focused (0 = search, 1 = replace).
     pub focused_field: usize,
     /// LSP manager for language server integration.
@@ -98,6 +102,12 @@ pub struct EditorApp {
     pub completion_trigger_pos: Option<(usize, usize)>,
     /// Notification manager for user feedback.
     pub notifications: NotificationManager,
+    /// Whether a document change is waiting to be sent to LSP.
+    pub pending_lsp_change: bool,
+    /// Timestamp of the last buffered document change.
+    pub last_lsp_change: Option<Instant>,
+    /// Debounce duration for LSP didChange.
+    pub lsp_change_debounce: Duration,
 }
 
 impl EditorApp {
@@ -121,6 +131,7 @@ impl EditorApp {
             search_text: String::new(),
             replace_text: String::new(),
             goto_text: String::new(),
+            rename_text: String::new(),
             focused_field: 0,
             lsp_manager: LspManager::new(),
             hover_mouse_pos: None,
@@ -130,6 +141,9 @@ impl EditorApp {
             completion_selected: 0,
             completion_trigger_pos: None,
             notifications: NotificationManager::new(),
+            pending_lsp_change: false,
+            last_lsp_change: None,
+            lsp_change_debounce: Duration::from_millis(40),
         }
     }
 
@@ -190,6 +204,62 @@ impl EditorApp {
                     }
                 }
             }
+            LspEvent::Rename { edits } => {
+                // Apply workspace edits from rename
+                let mut total_edits = 0;
+                let mut files_changed = 0;
+
+                // Store original active buffer to restore later
+                let original_active = self.workspace.active_buffer_id();
+
+                for (path, file_edits) in edits {
+                    // First, find if file is already open (separate scope to release borrow)
+                    let existing_id = {
+                        self.workspace.editors()
+                            .find(|(_, e)| e.file_path() == Some(path.as_path()))
+                            .map(|(id, _)| id)
+                    };
+
+                    // Open or use existing
+                    let editor_id = if let Some(id) = existing_id {
+                        Some(id)
+                    } else if let Ok(id) = self.workspace.open_file(&path) {
+                        Some(id)
+                    } else {
+                        log::error!("Failed to open file for rename: {:?}", path);
+                        None
+                    };
+
+                    if let Some(id) = editor_id {
+                        // Set this buffer as active to get mutable access
+                        self.workspace.set_active(id);
+                        if let Some(editor) = self.workspace.active_editor_mut() {
+                            // Apply edits in reverse order to preserve positions
+                            let mut sorted_edits = file_edits;
+                            sorted_edits.sort_by(|a, b| {
+                                (b.0, b.1).cmp(&(a.0, a.1))
+                            });
+                            for (start_line, start_col, end_line, end_col, new_text) in sorted_edits {
+                                editor.replace_range(start_line, start_col, end_line, end_col, &new_text);
+                                total_edits += 1;
+                            }
+                            files_changed += 1;
+                        }
+                    }
+                }
+
+                // Restore original active buffer
+                if let Some(id) = original_active {
+                    self.workspace.set_active(id);
+                }
+
+                if total_edits > 0 {
+                    self.notifications.success(format!(
+                        "Renamed: {} occurrences in {} file(s)",
+                        total_edits, files_changed
+                    ));
+                }
+            }
             LspEvent::ServerReady { language } => {
                 log::info!("LSP server ready for {}", language);
             }
@@ -201,16 +271,8 @@ impl EditorApp {
 
     /// Notifies LSP that the active document changed.
     pub fn notify_lsp_document_change(&mut self) {
-        if let Some(editor) = self.workspace.active_editor_mut() {
-            if let Some(path) = editor.file_path().map(|p| p.to_path_buf()) {
-                if let Some(lang) = language_id_from_path(&path) {
-                    let text = editor.buffer().to_string();
-                    editor.increment_document_version();
-                    let version = editor.document_version();
-                    self.lsp_manager.did_change(&path, lang, version, &text);
-                }
-            }
-        }
+        self.pending_lsp_change = true;
+        self.last_lsp_change = Some(Instant::now());
     }
 
     /// Notifies LSP that a file was opened.
@@ -245,6 +307,44 @@ impl EditorApp {
                 }
             }
         }
+    }
+
+    /// Notifies LSP that a file was closed.
+    pub fn notify_lsp_file_closed(&mut self, path: &PathBuf) {
+        if let Some(lang) = language_id_from_path(path) {
+            self.flush_pending_lsp_changes(true);
+            self.lsp_manager.did_close(path, lang);
+        }
+    }
+
+    /// Flushes any buffered didChange to LSP (debounced unless forced).
+    pub fn flush_pending_lsp_changes(&mut self, force: bool) {
+        if !self.pending_lsp_change {
+            return;
+        }
+
+        if !force {
+            if let Some(last) = self.last_lsp_change {
+                if last.elapsed() < self.lsp_change_debounce {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+
+        if let Some(editor) = self.workspace.active_editor_mut() {
+            if let Some(path) = editor.file_path().map(|p| p.to_path_buf()) {
+                if let Some(lang) = language_id_from_path(&path) {
+                    let text = editor.buffer().to_string();
+                    editor.increment_document_version();
+                    let version = editor.document_version();
+                    self.lsp_manager.did_change(&path, lang, version, &text);
+                }
+            }
+        }
+
+        self.pending_lsp_change = false;
     }
 
     /// Requests hover info from LSP at the current cursor position.
@@ -470,6 +570,33 @@ impl EditorApp {
     pub fn open_goto_line(&mut self) {
         self.input_mode = InputMode::GoToLine;
         self.goto_text.clear();
+    }
+
+    /// Opens the rename symbol dialog.
+    pub fn open_rename(&mut self) {
+        // Get the word under cursor to pre-fill the rename text
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(word) = editor.word_under_cursor() {
+                self.rename_text = word;
+            } else {
+                self.rename_text.clear();
+            }
+        }
+        self.input_mode = InputMode::Rename;
+    }
+
+    /// Requests rename from LSP.
+    pub fn request_rename(&mut self, new_name: &str) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                if let Some(lang) = language_id_from_path(path) {
+                    let pos = editor.cursor_position();
+                    let path = path.to_path_buf();
+                    self.lsp_manager.rename(&path, lang, pos.line, pos.col, new_name);
+                }
+            }
+        }
+        self.input_mode = InputMode::Normal;
     }
 
     /// Closes the search/replace/goto bar.
@@ -1231,6 +1358,21 @@ impl EditorApp {
                     renderer.draw_text(&info, info_x, text_y, renderer.colors.line_number);
                 }
             }
+            InputMode::Rename => {
+                // Draw "Rename:" label
+                renderer.draw_text("Rename to:", padding, text_y, renderer.colors.text);
+                let label_width = 10.0 * char_width + padding;
+
+                // Draw input field
+                let field_x = label_width + padding;
+                let field_width = 200.0;
+                self.draw_input_field(renderer, field_x, field_y, field_width, field_height, &self.rename_text, true, char_width, line_height);
+
+                // Draw hint
+                let hint = "(Enter to confirm, Esc to cancel)";
+                let hint_x = field_x + field_width + padding;
+                renderer.draw_text(hint, hint_x, text_y, renderer.colors.line_number);
+            }
             InputMode::Normal => {}
         }
     }
@@ -1545,6 +1687,7 @@ impl AppState {
                     .app
                     .handle_tab_bar_click(self.mouse_position.x as f32, gpu.char_width())
                 {
+                    self.app.flush_pending_lsp_changes(true);
                     self.app.workspace.switch_to_tab(tab_index);
                     self.update_window_title();
                 }
@@ -1603,6 +1746,9 @@ impl AppState {
                     InputMode::GoToLine => {
                         self.app.goto_text.pop();
                     }
+                    InputMode::Rename => {
+                        self.app.rename_text.pop();
+                    }
                     _ => {}
                 }
                 true
@@ -1655,6 +1801,15 @@ impl AppState {
                             self.app.close_input_bar();
                         }
                     }
+                    InputMode::Rename => {
+                        // Request rename with the new name
+                        if !self.app.rename_text.is_empty() {
+                            let new_name = self.app.rename_text.clone();
+                            self.app.request_rename(&new_name);
+                        } else {
+                            self.app.close_input_bar();
+                        }
+                    }
                     _ => {}
                 }
                 true
@@ -1686,6 +1841,12 @@ impl AppState {
                                     self.app.goto_text.push(c);
                                 }
                             }
+                            InputMode::Rename => {
+                                // Allow valid identifier characters
+                                if c.is_alphanumeric() || c == '_' {
+                                    self.app.rename_text.push(c);
+                                }
+                            }
                             _ => {}
                         }
                         return true;
@@ -1700,6 +1861,7 @@ impl AppState {
     fn execute_command(&mut self, command: EditorCommand, _event_loop: &ActiveEventLoop) -> bool {
         match command {
             EditorCommand::Save => {
+                self.app.flush_pending_lsp_changes(true);
                 if let Err(e) = self.app.workspace.save_active() {
                     if e.kind() == std::io::ErrorKind::Other {
                         // No file path - trigger Save As
@@ -1723,6 +1885,7 @@ impl AppState {
                 false
             }
             EditorCommand::SaveAs => {
+                self.app.flush_pending_lsp_changes(true);
                 self.show_save_as_dialog();
                 false
             }
@@ -1752,19 +1915,23 @@ impl AppState {
                         return false; // User cancelled, don't quit
                     }
                 }
+                self.shutdown_lsp();
                 true
             }
             EditorCommand::NextTab => {
+                self.app.flush_pending_lsp_changes(true);
                 self.app.workspace.next_tab();
                 self.update_window_title();
                 false
             }
             EditorCommand::PrevTab => {
+                self.app.flush_pending_lsp_changes(true);
                 self.app.workspace.prev_tab();
                 self.update_window_title();
                 false
             }
             EditorCommand::SwitchToTab(index) => {
+                self.app.flush_pending_lsp_changes(true);
                 self.app.workspace.switch_to_tab(index);
                 self.update_window_title();
                 false
@@ -2167,6 +2334,10 @@ impl AppState {
                 self.app.trigger_completion();
                 false
             }
+            EditorCommand::RenameSymbol => {
+                self.app.open_rename();
+                false
+            }
         }
     }
 
@@ -2284,6 +2455,17 @@ impl AppState {
             }
         }
 
+        // Notify LSP about the document being closed before dropping it
+        if let Some(path) = self
+            .app
+            .workspace
+            .active_editor()
+            .and_then(|e| e.file_path().map(|p| p.to_path_buf()))
+        {
+            self.app.flush_pending_lsp_changes(true);
+            self.app.notify_lsp_file_closed(&path);
+        }
+
         self.app.workspace.close_active_buffer();
 
         // If no buffers left, create a new one
@@ -2292,6 +2474,22 @@ impl AppState {
         }
 
         self.update_window_title();
+    }
+
+    /// Flushes pending LSP changes and closes all open LSP documents.
+    fn shutdown_lsp(&mut self) {
+        self.app.flush_pending_lsp_changes(true);
+        let open_paths: Vec<PathBuf> = self
+            .app
+            .workspace
+            .editors()
+            .filter_map(|(_, editor)| editor.file_path().map(|p| p.to_path_buf()))
+            .collect();
+
+        for path in open_paths {
+            self.app.notify_lsp_file_closed(&path);
+        }
+        self.app.lsp_manager.shutdown_all();
     }
 
     fn update_window_title(&self) {
@@ -2367,6 +2565,7 @@ impl ApplicationHandler for AppState {
                         return; // User cancelled, don't quit
                     }
                 }
+                self.shutdown_lsp();
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
@@ -2600,6 +2799,9 @@ impl ApplicationHandler for AppState {
             WindowEvent::RedrawRequested => {
                 // Poll LSP for events (non-blocking)
                 self.app.poll_lsp();
+
+                // Send debounced document changes
+                self.app.flush_pending_lsp_changes(false);
 
                 // Update cursor blink
                 let blink_needs_redraw = self.app.update_cursor_blink();

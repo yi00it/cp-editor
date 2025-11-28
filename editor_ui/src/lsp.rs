@@ -53,6 +53,10 @@ pub enum LspEvent {
         path: PathBuf,
         locations: Vec<(PathBuf, usize, usize)>,
     },
+    /// Rename result with workspace edits.
+    Rename {
+        edits: Vec<(PathBuf, Vec<(usize, usize, usize, usize, String)>)>,
+    },
     /// Server initialized.
     ServerReady { language: String },
     /// Server error.
@@ -374,10 +378,33 @@ impl LspManager {
                 // TODO: Handle references
                 None
             }
-            LspResponse::Rename { id, edit: _ } => {
+            LspResponse::Rename { id, edit } => {
                 self.pending_requests.remove(&id);
-                // TODO: Handle rename
-                None
+                if let Some(workspace_edit) = edit {
+                    // Convert to UI-friendly format: (path, [(start_line, start_col, end_line, end_col, new_text)])
+                    let edits: Vec<(PathBuf, Vec<(usize, usize, usize, usize, String)>)> = workspace_edit
+                        .changes
+                        .into_iter()
+                        .map(|(path, text_edits)| {
+                            let edits = text_edits
+                                .into_iter()
+                                .map(|e| {
+                                    (
+                                        e.range.start.line as usize,
+                                        e.range.start.character as usize,
+                                        e.range.end.line as usize,
+                                        e.range.end.character as usize,
+                                        e.new_text,
+                                    )
+                                })
+                                .collect();
+                            (path, edits)
+                        })
+                        .collect();
+                    Some(LspEvent::Rename { edits })
+                } else {
+                    None
+                }
             }
             LspResponse::DocumentSymbols { id, symbols: _ } => {
                 self.pending_requests.remove(&id);

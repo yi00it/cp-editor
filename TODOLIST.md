@@ -137,24 +137,24 @@ Goal: Make large files manageable.
 
 ---
 
-## PHASE 6 – Language Intelligence (LSP Phase)
+## PHASE 6 – Language Intelligence (LSP Phase) ✓ DONE
 
 Goal: Transform editor into an IDE-capable tool.
 
 ### Architecture
-- [ ] LSP client as a **separate module**
-- [ ] Async communication isolated from render loop
+- [x] LSP client as a **separate module**
+- [x] Async communication isolated from render loop
 
 ### Features
-- [ ] Diagnostics (errors, warnings)
-- [ ] Hover information
-- [ ] Go to definition
-- [ ] Rename symbol
-- [ ] Auto-completion (basic popup)
+- [x] Diagnostics (errors, warnings)
+- [x] Hover information
+- [x] Go to definition (F12)
+- [x] Rename symbol (F2)
+- [x] Auto-completion (basic popup, Ctrl+Space)
 
 **EXIT CRITERIA:**
-- LSP works without UI freezes
-- Editor remains stable even if server misbehaves
+- LSP works without UI freezes ✓
+- Editor remains stable even if server misbehaves ✓
 
 ---
 

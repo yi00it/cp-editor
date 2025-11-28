@@ -45,6 +45,8 @@ editor_desktop  →  editor_ui  →  editor_core
 | `editor_ui/src/app.rs` | EditorApp (event handling, state, tab bar, search UI) |
 | `editor_ui/src/gpu_renderer.rs` | GPU rendering pipeline |
 | `editor_ui/src/input.rs` | Keyboard/mouse handling |
+| `editor_ui/src/lsp.rs` | LSP manager and event handling |
+| `editor_lsp/src/client.rs` | LSP client and server communication |
 
 ## Keybindings
 
@@ -78,6 +80,9 @@ editor_desktop  →  editor_ui  →  editor_core
 | Replace | Ctrl+H | Cmd+H |
 | Go to Line | Ctrl+G | Cmd+G |
 | Close Search/Replace | Escape | Escape |
+| Go to Definition | F12 | F12 |
+| Rename Symbol | F2 | F2 |
+| Trigger Completion | Ctrl+Space | Cmd+Space |
 
 ## Tech Stack
 

@@ -284,6 +284,74 @@ impl TextBuffer {
             Some(self.rope.line(line).to_string())
         }
     }
+
+    /// Finds the start of the word at the given position.
+    /// Unlike find_word_boundary_left, this doesn't skip whitespace first.
+    pub fn find_word_start(&self, char_idx: usize) -> usize {
+        if char_idx == 0 {
+            return 0;
+        }
+
+        // If we're not on a word char, return current position
+        if let Some(ch) = self.char_at(char_idx) {
+            if !Self::is_word_char(ch) {
+                // Check if previous char is word char
+                if char_idx > 0 {
+                    if let Some(prev_ch) = self.char_at(char_idx - 1) {
+                        if !Self::is_word_char(prev_ch) {
+                            return char_idx;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut pos = char_idx;
+        // Go backwards to find word start
+        while pos > 0 {
+            if let Some(ch) = self.char_at(pos - 1) {
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                pos -= 1;
+            } else {
+                break;
+            }
+        }
+
+        pos
+    }
+
+    /// Finds the end of the word at the given position.
+    /// Unlike find_word_boundary_right, this doesn't skip whitespace after.
+    pub fn find_word_end(&self, char_idx: usize) -> usize {
+        let len = self.len_chars();
+        if char_idx >= len {
+            return len;
+        }
+
+        // If we're not on a word char, check if we're just after a word
+        if let Some(ch) = self.char_at(char_idx) {
+            if !Self::is_word_char(ch) {
+                return char_idx;
+            }
+        }
+
+        let mut pos = char_idx;
+        // Go forwards to find word end
+        while pos < len {
+            if let Some(ch) = self.char_at(pos) {
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        pos
+    }
 }
 
 #[cfg(test)]

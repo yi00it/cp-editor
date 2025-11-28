@@ -143,6 +143,7 @@ pub enum EditorCommand {
     // LSP commands
     GotoDefinition,
     TriggerCompletion,
+    RenameSymbol,
 
     // Code editing
     ToggleComment,
@@ -288,6 +289,7 @@ impl InputHandler {
                     Some(EditorCommand::FindNext)
                 }
             }
+            Key::Named(NamedKey::F2) => Some(EditorCommand::RenameSymbol),
             Key::Named(NamedKey::F12) => Some(EditorCommand::GotoDefinition),
             Key::Named(NamedKey::Home) => {
                 if primary {

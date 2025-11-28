@@ -1,7 +1,7 @@
 //! Main editor logic.
 
 use crate::buffer::TextBuffer;
-use crate::cursor::{Cursor, MultiCursor, Position};
+use crate::cursor::{Cursor, MultiCursor, Position, Selection};
 use crate::fold::FoldManager;
 use crate::history::{EditOperation, History};
 use crate::lsp_types::{CompletionItem, Diagnostic, HoverInfo};
@@ -1241,6 +1241,98 @@ impl Editor {
             }
             text
         })
+    }
+
+    /// Returns the word under the cursor, if any.
+    pub fn word_under_cursor(&self) -> Option<String> {
+        let pos = self.cursor.position();
+
+        // Find word boundaries
+        let start = self.buffer.find_word_start(pos);
+        let end = self.buffer.find_word_end(pos);
+
+        if start >= end {
+            return None;
+        }
+
+        let mut word = String::new();
+        for i in start..end {
+            if let Some(ch) = self.buffer.char_at(i) {
+                word.push(ch);
+            }
+        }
+
+        if word.is_empty() {
+            None
+        } else {
+            Some(word)
+        }
+    }
+
+    /// Replaces text in the given range with new text.
+    /// Positions are 0-indexed (line, column).
+    pub fn replace_range(&mut self, start_line: usize, start_col: usize, end_line: usize, end_col: usize, new_text: &str) {
+        let start_char = self.buffer.line_col_to_char(start_line, start_col);
+        let end_char = self.buffer.line_col_to_char(end_line, end_col);
+
+        let removed_len = end_char.saturating_sub(start_char);
+        let new_len = new_text.chars().count();
+        let delta = new_len as isize - removed_len as isize;
+
+        // Capture removed text for undo/redo
+        let removed_text: String = if end_char > start_char {
+            (start_char..end_char)
+                .filter_map(|i| self.buffer.char_at(i))
+                .collect()
+        } else {
+            String::new()
+        };
+
+        // Record edit for undo/redo
+        self.history.begin_edit(self.cursor.selection);
+
+        // Delete the range
+        if end_char > start_char {
+            self.buffer.remove(start_char, end_char);
+            self.history.record(EditOperation::Delete {
+                position: start_char,
+                text: removed_text.clone(),
+            });
+        }
+
+        // Insert the new text
+        self.buffer.insert(start_char, new_text);
+        if !new_text.is_empty() {
+            self.history.record(EditOperation::Insert {
+                position: start_char,
+                text: new_text.to_string(),
+            });
+        }
+
+        // Adjust cursor/multi-cursor positions
+        let mut adjust_selection = |selection: &mut Selection| {
+            if selection.cursor >= start_char {
+                selection.cursor = (selection.cursor as isize + delta).max(0) as usize;
+            }
+            if selection.anchor >= start_char {
+                selection.anchor = (selection.anchor as isize + delta).max(0) as usize;
+            }
+        };
+        adjust_selection(&mut self.cursor.selection);
+        self.multi_cursors.adjust_positions(start_char, delta);
+        self.multi_cursors.clamp_to_buffer(&self.buffer);
+        self.cursor.clamp_to_buffer(&self.buffer);
+
+        // Finalize history entry
+        self.history.set_selection_after(self.cursor.selection);
+        self.history.commit_edit();
+
+        // Mark as modified
+        self.modified = true;
+        self.document_version += 1;
+
+        // Update syntax highlighting
+        self.highlighter.invalidate_cache();
     }
 
     // ==================== Block Selection ====================
