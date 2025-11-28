@@ -153,6 +153,9 @@ pub enum EditorCommand {
     ToggleFold,
     FoldAll,
     UnfoldAll,
+
+    // Performance
+    TogglePerfMetrics,
 }
 
 /// Input handler that maps keyboard/mouse events to editor commands.
@@ -360,6 +363,7 @@ impl InputHandler {
                 "a" | "A" => Some(EditorCommand::SelectAll),
                 "d" | "D" => Some(EditorCommand::DuplicateLine),
                 "b" | "B" if shift => Some(EditorCommand::ToggleBlockSelection),
+                "p" | "P" if shift => Some(EditorCommand::TogglePerfMetrics),
                 // Clipboard
                 "c" | "C" => Some(EditorCommand::Copy),
                 "x" | "X" => Some(EditorCommand::Cut),

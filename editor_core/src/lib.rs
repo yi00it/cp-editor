@@ -9,6 +9,7 @@ pub mod editor;
 pub mod fold;
 pub mod history;
 pub mod lsp_types;
+pub mod perf;
 pub mod search;
 pub mod syntax;
 pub mod workspace;
@@ -19,6 +20,9 @@ pub use editor::Editor;
 pub use fold::{FoldManager, FoldRegion};
 pub use history::{EditOperation, History};
 pub use lsp_types::{CompletionItem, CompletionKind, Diagnostic, DiagnosticSeverity, HoverInfo};
+pub use perf::{
+    FrameStats, MemoryStats, PerfMetrics, RollingStats, ScrollPerf, StartupTiming, TypingLatency,
+};
 pub use search::{Search, SearchMatch};
 pub use syntax::{Language, SyntaxHighlighter, Theme, TokenStyle};
 pub use workspace::{BufferId, TabInfo, Workspace};

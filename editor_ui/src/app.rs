@@ -5,6 +5,7 @@ use crate::input::{EditorCommand, InputHandler};
 use crate::lsp::{language_id_from_path, LspEvent, LspManager};
 use crate::notifications::NotificationManager;
 use cp_editor_core::lsp_types::{CompletionItem, DiagnosticSeverity};
+use cp_editor_core::perf::PerfMetrics;
 use cp_editor_core::Workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -108,6 +109,12 @@ pub struct EditorApp {
     pub last_lsp_change: Option<Instant>,
     /// Debounce duration for LSP didChange.
     pub lsp_change_debounce: Duration,
+    /// Performance metrics.
+    pub perf_metrics: PerfMetrics,
+    /// Whether to show performance metrics in status bar.
+    pub show_perf_metrics: bool,
+    /// Frame start time for measuring frame duration.
+    frame_start: Option<Instant>,
 }
 
 impl EditorApp {
@@ -144,7 +151,44 @@ impl EditorApp {
             pending_lsp_change: false,
             last_lsp_change: None,
             lsp_change_debounce: Duration::from_millis(40),
+            perf_metrics: PerfMetrics::new(),
+            show_perf_metrics: false,
+            frame_start: None,
         }
+    }
+
+    /// Starts timing a frame.
+    pub fn begin_frame(&mut self) {
+        self.frame_start = Some(Instant::now());
+    }
+
+    /// Ends timing a frame and records the duration.
+    pub fn end_frame(&mut self) {
+        if let Some(start) = self.frame_start.take() {
+            self.perf_metrics.frame_stats.record_frame(start.elapsed());
+        }
+        // Also complete any pending typing latency measurement
+        self.perf_metrics.typing_latency.render_complete();
+    }
+
+    /// Records a keypress for typing latency measurement.
+    pub fn record_keypress(&mut self) {
+        self.perf_metrics.typing_latency.keypress();
+    }
+
+    /// Updates memory statistics from the active buffer.
+    pub fn update_memory_stats(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            let buffer = editor.buffer();
+            let buffer_bytes = buffer.len_chars() * 4; // Rough estimate: 4 bytes per char
+            let line_count = buffer.len_lines();
+            self.perf_metrics.memory_stats.update(buffer_bytes, line_count);
+        }
+    }
+
+    /// Toggles performance metrics display.
+    pub fn toggle_perf_metrics(&mut self) {
+        self.show_perf_metrics = !self.show_perf_metrics;
     }
 
     /// Polls LSP for events and processes them.
@@ -1453,6 +1497,19 @@ impl EditorApp {
 
             // Encoding (always UTF-8 for now)
             renderer.draw_text("UTF-8", left_x, text_y, renderer.colors.line_number);
+            left_x += 7.0 * char_width;
+
+            // Performance metrics (if enabled)
+            if self.show_perf_metrics {
+                let perf_text = format!(
+                    "FPS:{:.0} Frame:{:.1}ms Lat:{:.1}ms Mem:{:.1}MB",
+                    self.perf_metrics.frame_stats.fps(),
+                    self.perf_metrics.frame_stats.frame.average_ms(),
+                    self.perf_metrics.typing_latency.average_ms(),
+                    self.perf_metrics.memory_stats.buffer_mb(),
+                );
+                renderer.draw_text(&perf_text, left_x, text_y, [0.6, 0.8, 0.6, 1.0]);
+            }
 
             // Right side: Cursor position
             let cursor = editor.cursor_position();
@@ -2285,17 +2342,21 @@ impl AppState {
                 false
             }
             EditorCommand::ScrollUp(lines) => {
+                let start = Instant::now();
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     let current = editor.scroll_offset();
                     editor.set_scroll_offset(current.saturating_sub(lines as usize));
                 }
+                self.app.perf_metrics.scroll_perf.record_scroll(start.elapsed(), lines as u32);
                 false
             }
             EditorCommand::ScrollDown(lines) => {
+                let start = Instant::now();
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     let current = editor.scroll_offset();
                     editor.set_scroll_offset(current + lines as usize);
                 }
+                self.app.perf_metrics.scroll_perf.record_scroll(start.elapsed(), lines as u32);
                 false
             }
             EditorCommand::OpenSearch => {
@@ -2336,6 +2397,12 @@ impl AppState {
             }
             EditorCommand::RenameSymbol => {
                 self.app.open_rename();
+                false
+            }
+            EditorCommand::TogglePerfMetrics => {
+                self.app.toggle_perf_metrics();
+                let state = if self.app.show_perf_metrics { "enabled" } else { "disabled" };
+                self.app.notifications.info(format!("Performance metrics {}", state));
                 false
             }
         }
@@ -2691,6 +2758,8 @@ impl ApplicationHandler for AppState {
                             if !self.modifiers.control_key() && !self.modifiers.alt_key() {
                                 if let Some(c) = ch.chars().next() {
                                     if let Some(command) = self.app.input_handler.handle_char_input(c) {
+                                        // Record keypress for typing latency measurement
+                                        self.app.record_keypress();
                                         self.execute_command(command, event_loop);
                                         self.app.reset_cursor_blink();
                                         if let Some(window) = &self.window {
@@ -2797,6 +2866,9 @@ impl ApplicationHandler for AppState {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Start frame timing
+                self.app.begin_frame();
+
                 // Poll LSP for events (non-blocking)
                 self.app.poll_lsp();
 
@@ -2823,9 +2895,15 @@ impl ApplicationHandler for AppState {
                     })
                     .unwrap_or(false);
 
+                // Update memory stats periodically
+                self.app.update_memory_stats();
+
                 if let Some(gpu) = &mut self.gpu {
                     gpu.render(&self.app);
                 }
+
+                // End frame timing
+                self.app.end_frame();
 
                 // Request next frame for continuous animations
                 if let Some(window) = &self.window {

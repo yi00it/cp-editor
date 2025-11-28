@@ -159,6 +159,17 @@ impl Editor {
         &self.buffer
     }
 
+    /// Sets the buffer content (for testing/benchmarking).
+    pub fn set_buffer(&mut self, buffer: TextBuffer) {
+        self.buffer = buffer;
+        self.cursor.clamp_to_buffer(&self.buffer);
+        self.multi_cursors.clamp_to_buffer(&self.buffer);
+        self.history.clear();
+        self.search.clear();
+        self.highlighter.invalidate_cache();
+        self.modified = false;
+    }
+
     /// Returns the cursor position as (line, column).
     pub fn cursor_position(&self) -> Position {
         let (line, col) = self.buffer.char_to_line_col(self.cursor.position());

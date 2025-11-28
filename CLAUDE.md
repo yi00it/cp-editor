@@ -83,6 +83,7 @@ editor_desktop  →  editor_ui  →  editor_core
 | Go to Definition | F12 | F12 |
 | Rename Symbol | F2 | F2 |
 | Trigger Completion | Ctrl+Space | Cmd+Space |
+| Toggle Perf Metrics | Ctrl+Shift+P | Cmd+Shift+P |
 
 ## Tech Stack
 
