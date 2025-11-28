@@ -125,6 +125,12 @@ impl Editor {
         self.buffer.save_to_file(path)?;
         self.file_path = Some(path.to_path_buf());
         self.modified = false;
+
+        // Update syntax highlighting based on new file extension
+        let language = Language::from_path(path);
+        self.highlighter.set_language(language);
+        self.reparse_syntax();
+
         Ok(())
     }
 
@@ -879,8 +885,20 @@ impl Editor {
         self.multi_cursors.len() > 1
     }
 
+    /// Syncs the primary cursor position to multi_cursors.
+    /// Call this before transitioning to multi-cursor mode.
+    fn sync_cursor_to_multi(&mut self) {
+        // Set the multi_cursors primary position to match the main cursor
+        self.multi_cursors.set_position(self.cursor.position(), false);
+    }
+
     /// Adds a cursor above the current cursor position.
     pub fn add_cursor_above(&mut self) {
+        // Sync primary cursor before adding new cursor
+        if self.multi_cursors.is_single() {
+            self.sync_cursor_to_multi();
+        }
+
         let (line, col) = self.buffer.char_to_line_col(self.cursor.position());
         if line > 0 {
             let new_line = line - 1;
@@ -892,6 +910,11 @@ impl Editor {
 
     /// Adds a cursor below the current cursor position.
     pub fn add_cursor_below(&mut self) {
+        // Sync primary cursor before adding new cursor
+        if self.multi_cursors.is_single() {
+            self.sync_cursor_to_multi();
+        }
+
         let (line, col) = self.buffer.char_to_line_col(self.cursor.position());
         if line + 1 < self.buffer.len_lines() {
             let new_line = line + 1;
@@ -903,6 +926,10 @@ impl Editor {
 
     /// Adds a cursor at the specified line and column.
     pub fn add_cursor_at(&mut self, line: usize, col: usize) {
+        // Sync primary cursor before adding new cursor
+        if self.multi_cursors.is_single() {
+            self.sync_cursor_to_multi();
+        }
         self.multi_cursors.add_cursor_at(&self.buffer, line, col);
     }
 
@@ -913,16 +940,28 @@ impl Editor {
 
     /// Returns all cursor positions for rendering.
     pub fn all_cursor_positions(&self) -> Vec<(usize, usize)> {
-        self.multi_cursors
-            .positions()
-            .iter()
-            .map(|&pos| self.buffer.char_to_line_col(pos))
-            .collect()
+        // When there's only one cursor, use the primary cursor (self.cursor)
+        // which is kept in sync with editing operations
+        if self.multi_cursors.is_single() {
+            vec![self.buffer.char_to_line_col(self.cursor.position())]
+        } else {
+            // Multi-cursor mode: use positions from multi_cursors
+            self.multi_cursors
+                .positions()
+                .iter()
+                .map(|&pos| self.buffer.char_to_line_col(pos))
+                .collect()
+        }
     }
 
     /// Returns all selection ranges for rendering.
     pub fn all_selection_ranges(&self) -> Vec<Option<(usize, usize)>> {
-        self.multi_cursors.selection_ranges()
+        // When there's only one cursor, use the primary cursor's selection
+        if self.multi_cursors.is_single() {
+            vec![self.cursor.selected_range()]
+        } else {
+            self.multi_cursors.selection_ranges()
+        }
     }
 
     // ==================== Syntax Highlighting ====================
