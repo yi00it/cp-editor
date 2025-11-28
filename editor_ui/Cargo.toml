@@ -1,0 +1,16 @@
+[package]
+name = "cp-editor-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CP Editor - GPU rendering and UI layer"
+
+[dependencies]
+cp-editor-core = { path = "../editor_core" }
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+fontdue.workspace = true
+log.workspace = true
+bytemuck = { version = "1.14", features = ["derive"] }

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "editor_core",
+    "editor_ui",
+    "editor_desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Yigit"]
+repository = "https://github.com/yigit/CP-Editor"
+description = "CP Editor - A native, GPU-accelerated, cross-platform text editor"
+keywords = ["editor", "text-editor", "gpu", "cross-platform"]
+categories = ["text-editors", "development-tools"]
+
+[workspace.dependencies]
+# Core
+ropey = "1.6"
+
+# Graphics
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"
+fontdue = "0.9"
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Utilities
+log = "0.4"
+env_logger = "0.10"

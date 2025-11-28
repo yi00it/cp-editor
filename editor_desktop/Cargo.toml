@@ -1,0 +1,17 @@
+[package]
+name = "cp-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CP Editor - Desktop application entry point"
+
+[[bin]]
+name = "cp-editor"
+path = "src/main.rs"
+
+[dependencies]
+cp-editor-core = { path = "../editor_core" }
+cp-editor-ui = { path = "../editor_ui" }
+log.workspace = true
+env_logger.workspace = true
