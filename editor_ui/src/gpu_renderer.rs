@@ -31,6 +31,7 @@ pub struct Colors {
     pub completion_bg: [f32; 4],
     pub completion_selected_bg: [f32; 4],
     pub completion_border: [f32; 4],
+    pub bracket_match: [f32; 4],
 }
 
 impl Default for Colors {
@@ -59,6 +60,7 @@ impl Default for Colors {
             completion_bg: [0.12, 0.12, 0.15, 0.98],        // Slightly darker for completion
             completion_selected_bg: [0.25, 0.35, 0.55, 1.0], // Blue highlight for selected
             completion_border: [0.3, 0.3, 0.35, 1.0],       // Same as hover border
+            bracket_match: [0.4, 0.6, 0.8, 0.4],            // Light blue highlight for matching brackets
         }
     }
 }

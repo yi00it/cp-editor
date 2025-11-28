@@ -2,6 +2,7 @@
 
 use crate::buffer::TextBuffer;
 use crate::cursor::{Cursor, MultiCursor, Position};
+use crate::fold::FoldManager;
 use crate::history::{EditOperation, History};
 use crate::lsp_types::{CompletionItem, Diagnostic, HoverInfo};
 use crate::search::{Search, SearchMatch};
@@ -48,6 +49,12 @@ pub struct Editor {
     completions: Vec<CompletionItem>,
     /// Document version for LSP (increments on each change).
     document_version: i32,
+    /// Whether word wrap is enabled.
+    word_wrap: bool,
+    /// Wrap width in characters (used when word_wrap is true).
+    wrap_width: usize,
+    /// Code folding manager.
+    fold_manager: FoldManager,
 }
 
 impl Default for Editor {
@@ -77,6 +84,9 @@ impl Editor {
             hover_info: None,
             completions: Vec::new(),
             document_version: 0,
+            word_wrap: false,
+            wrap_width: 80,
+            fold_manager: FoldManager::new(),
         }
     }
 
@@ -265,6 +275,166 @@ impl Editor {
         self.scroll_to_cursor();
     }
 
+    // ==================== Word Wrap ====================
+
+    /// Returns whether word wrap is enabled.
+    pub fn word_wrap(&self) -> bool {
+        self.word_wrap
+    }
+
+    /// Enables or disables word wrap.
+    pub fn set_word_wrap(&mut self, enabled: bool) {
+        self.word_wrap = enabled;
+    }
+
+    /// Toggles word wrap.
+    pub fn toggle_word_wrap(&mut self) {
+        self.word_wrap = !self.word_wrap;
+    }
+
+    /// Returns the wrap width in characters.
+    pub fn wrap_width(&self) -> usize {
+        self.wrap_width
+    }
+
+    /// Sets the wrap width in characters.
+    pub fn set_wrap_width(&mut self, width: usize) {
+        self.wrap_width = width.max(10);
+    }
+
+    /// Returns wrapped line segments for rendering.
+    /// Each segment is (start_col, end_col) within the line.
+    /// If word wrap is disabled, returns a single segment covering the whole line.
+    pub fn get_wrapped_line_segments(&self, line: usize) -> Vec<(usize, usize)> {
+        if !self.word_wrap {
+            // No wrapping - return entire line as one segment
+            let line_len = self.buffer.line_len_chars(line);
+            return vec![(0, line_len)];
+        }
+
+        let line_text = match self.buffer.line(line) {
+            Some(text) => text,
+            None => return vec![],
+        };
+
+        let line_len = line_text.chars().count();
+        if line_len == 0 {
+            return vec![(0, 0)];
+        }
+
+        let mut segments = Vec::new();
+        let mut start = 0;
+
+        while start < line_len {
+            let end = (start + self.wrap_width).min(line_len);
+
+            // Try to find a word boundary if we're not at the end
+            let actual_end = if end < line_len {
+                // Look for last space or punctuation within the wrap width
+                let search_start = start;
+                let text_slice: String = line_text.chars().skip(search_start).take(end - search_start).collect();
+
+                // Find last word boundary (space, tab)
+                if let Some(last_space) = text_slice.rfind(|c: char| c == ' ' || c == '\t') {
+                    let boundary = search_start + last_space + 1;
+                    if boundary > start {
+                        boundary
+                    } else {
+                        end
+                    }
+                } else {
+                    end
+                }
+            } else {
+                end
+            };
+
+            segments.push((start, actual_end));
+            start = actual_end;
+        }
+
+        if segments.is_empty() {
+            segments.push((0, 0));
+        }
+
+        segments
+    }
+
+    /// Returns the total number of visual lines (accounting for word wrap).
+    pub fn visual_line_count(&self) -> usize {
+        if !self.word_wrap {
+            return self.buffer.len_lines();
+        }
+
+        let mut count = 0;
+        for line in 0..self.buffer.len_lines() {
+            count += self.get_wrapped_line_segments(line).len();
+        }
+        count.max(1)
+    }
+
+    // ==================== Code Folding ====================
+
+    /// Returns a reference to the fold manager.
+    pub fn fold_manager(&self) -> &FoldManager {
+        &self.fold_manager
+    }
+
+    /// Returns a mutable reference to the fold manager.
+    pub fn fold_manager_mut(&mut self) -> &mut FoldManager {
+        &mut self.fold_manager
+    }
+
+    /// Detects fold regions in the buffer.
+    /// Uses brace matching for brace-based languages, indent-based for others.
+    pub fn detect_folds(&mut self) {
+        let language = self.highlighter.language();
+        match language {
+            Language::Python => {
+                self.fold_manager.detect_indent_folds(&self.buffer);
+            }
+            _ => {
+                self.fold_manager.detect_brace_folds(&self.buffer);
+            }
+        }
+    }
+
+    /// Toggles the fold at the current cursor line.
+    pub fn toggle_fold_at_cursor(&mut self) -> bool {
+        let (line, _) = self.buffer.char_to_line_col(self.cursor.position());
+        self.fold_manager.toggle_fold_at_line(line)
+    }
+
+    /// Toggles the fold at the given line.
+    pub fn toggle_fold_at_line(&mut self, line: usize) -> bool {
+        self.fold_manager.toggle_fold_at_line(line)
+    }
+
+    /// Folds all regions.
+    pub fn fold_all(&mut self) {
+        self.fold_manager.fold_all();
+    }
+
+    /// Unfolds all regions.
+    pub fn unfold_all(&mut self) {
+        self.fold_manager.unfold_all();
+    }
+
+    /// Returns whether the given line is hidden (inside a folded region).
+    pub fn is_line_hidden(&self, line: usize) -> bool {
+        self.fold_manager.is_line_hidden(line)
+    }
+
+    /// Returns whether the given line is the start of a fold region.
+    pub fn is_fold_start(&self, line: usize) -> bool {
+        self.fold_manager.is_fold_start(line)
+    }
+
+    /// Returns whether the fold at the given line is collapsed.
+    pub fn is_line_folded(&self, line: usize) -> bool {
+        self.fold_manager.is_line_folded(line)
+    }
+
     // ==================== Text Editing ====================
 
     /// Inserts a character at the cursor position.
@@ -309,9 +479,128 @@ impl Editor {
         self.scroll_to_cursor();
     }
 
-    /// Inserts a newline at the cursor position.
+    /// Inserts a newline at the cursor position with auto-indentation.
     pub fn insert_newline(&mut self) {
-        self.insert_char('\n');
+        self.begin_edit();
+
+        // Delete selection first if any
+        self.delete_selection_internal();
+
+        let pos = self.cursor.position();
+        let (line, _col) = self.buffer.char_to_line_col(pos);
+
+        // Get the indentation of the current line
+        let indent = self.get_line_indentation(line);
+
+        // Check if we should add extra indentation (after { or :)
+        let extra_indent = self.should_increase_indent(line, pos);
+
+        // Insert newline
+        self.buffer.insert_char(pos, '\n');
+        self.history.record(EditOperation::Insert {
+            position: pos,
+            text: "\n".to_string(),
+        });
+
+        // Build indentation string
+        let mut indent_str = indent.clone();
+        if extra_indent {
+            // Add one level of indentation (use same style as current line or default to 4 spaces)
+            if indent.contains('\t') {
+                indent_str.push('\t');
+            } else {
+                indent_str.push_str("    ");
+            }
+        }
+
+        // Insert indentation
+        if !indent_str.is_empty() {
+            self.buffer.insert(pos + 1, &indent_str);
+            self.history.record(EditOperation::Insert {
+                position: pos + 1,
+                text: indent_str.clone(),
+            });
+        }
+
+        self.cursor.set_position(pos + 1 + indent_str.len(), false);
+        self.finish_edit();
+        self.scroll_to_cursor();
+    }
+
+    /// Gets the indentation (leading whitespace) of a line.
+    fn get_line_indentation(&self, line: usize) -> String {
+        if let Some(line_text) = self.buffer.line(line) {
+            let mut indent = String::new();
+            for ch in line_text.chars() {
+                if ch == ' ' || ch == '\t' {
+                    indent.push(ch);
+                } else {
+                    break;
+                }
+            }
+            indent
+        } else {
+            String::new()
+        }
+    }
+
+    /// Checks if we should increase indentation after this line.
+    /// Returns true after opening braces, colons (Python), etc.
+    fn should_increase_indent(&self, line: usize, cursor_pos: usize) -> bool {
+        let line_start = self.buffer.line_start(line);
+        let cursor_col = cursor_pos - line_start;
+
+        if let Some(line_text) = self.buffer.line(line) {
+            // Only look at text before cursor
+            let text_before_cursor: String = line_text.chars().take(cursor_col).collect();
+            let trimmed = text_before_cursor.trim_end();
+
+            // Check for characters that should trigger indent
+            if let Some(last_char) = trimmed.chars().last() {
+                matches!(last_char, '{' | '[' | '(' | ':')
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Gets the selected text as a string.
+    /// Returns None if there's no selection.
+    pub fn get_selected_text(&self) -> Option<String> {
+        if let Some((start, end)) = self.cursor.selected_range() {
+            let mut text = String::new();
+            for i in start..end {
+                if let Some(ch) = self.buffer.char_at(i) {
+                    text.push(ch);
+                }
+            }
+            Some(text)
+        } else {
+            None
+        }
+    }
+
+    /// Cuts the selected text (returns it and deletes from buffer).
+    /// Returns None if there's no selection.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let text = self.get_selected_text();
+        if text.is_some() {
+            self.begin_edit();
+            self.delete_selection_internal();
+            self.finish_edit();
+            self.scroll_to_cursor();
+        }
+        text
+    }
+
+    /// Pastes text at the cursor position.
+    pub fn paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.insert_text(text);
     }
 
     /// Deletes the character before the cursor (backspace).
@@ -699,6 +988,233 @@ impl Editor {
 
         self.finish_edit();
         self.scroll_to_cursor();
+    }
+
+    /// Toggles line comment on the current line or selected lines.
+    pub fn toggle_comment(&mut self) {
+        let comment_prefix = match self.highlighter.language().line_comment() {
+            Some(prefix) => prefix,
+            None => return, // Language doesn't support line comments
+        };
+
+        self.begin_edit();
+
+        let cursor_pos = self.cursor.position();
+        let (start_line, end_line) = if let Some((sel_start, sel_end)) = self.cursor.selected_range() {
+            let (start_line, _) = self.buffer.char_to_line_col(sel_start);
+            let (end_line, end_col) = self.buffer.char_to_line_col(sel_end);
+            // If selection ends at beginning of line, don't include that line
+            let end_line = if end_col == 0 && end_line > start_line {
+                end_line - 1
+            } else {
+                end_line
+            };
+            (start_line, end_line)
+        } else {
+            let (line, _) = self.buffer.char_to_line_col(cursor_pos);
+            (line, line)
+        };
+
+        // Check if all lines are commented (to decide whether to uncomment or comment)
+        let all_commented = (start_line..=end_line).all(|line| {
+            if let Some(line_text) = self.buffer.line(line) {
+                let trimmed = line_text.trim_start();
+                trimmed.starts_with(comment_prefix)
+            } else {
+                true
+            }
+        });
+
+        // Calculate position adjustments
+        let comment_len = comment_prefix.len() + 1; // prefix + space
+        let mut total_offset: isize = 0;
+
+        for line in start_line..=end_line {
+            let line_start = self.buffer.line_start(line);
+
+            if all_commented {
+                // Uncomment: remove the comment prefix
+                if let Some(line_text) = self.buffer.line(line) {
+                    let first_non_ws = line_text
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .count();
+
+                    let content_start = line_start + first_non_ws;
+                    let rest = &line_text[first_non_ws..];
+
+                    if rest.starts_with(comment_prefix) {
+                        // Check if there's a space after the prefix
+                        let has_space = rest.len() > comment_prefix.len()
+                            && rest.chars().nth(comment_prefix.len()) == Some(' ');
+                        let remove_len = if has_space { comment_len } else { comment_prefix.len() };
+
+                        let remove_end = (content_start + remove_len).min(self.buffer.len_chars());
+                        let removed_text: String = (content_start..remove_end)
+                            .filter_map(|i| self.buffer.char_at(i))
+                            .collect();
+
+                        self.buffer.remove(content_start, remove_end);
+                        self.history.record(EditOperation::Delete {
+                            position: content_start,
+                            text: removed_text,
+                        });
+
+                        total_offset -= remove_len as isize;
+                    }
+                }
+            } else {
+                // Comment: add the comment prefix at the start of non-whitespace
+                if let Some(line_text) = self.buffer.line(line) {
+                    let first_non_ws = line_text
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .count();
+
+                    let insert_pos = line_start + first_non_ws;
+                    let insert_text = format!("{} ", comment_prefix);
+
+                    self.buffer.insert(insert_pos, &insert_text);
+                    self.history.record(EditOperation::Insert {
+                        position: insert_pos,
+                        text: insert_text,
+                    });
+
+                    total_offset += comment_len as isize;
+                }
+            }
+        }
+
+        // Adjust cursor position
+        let new_pos = (cursor_pos as isize + total_offset).max(0) as usize;
+        self.cursor.set_position(new_pos.min(self.buffer.len_chars()), false);
+
+        self.finish_edit();
+        self.scroll_to_cursor();
+    }
+
+    // ==================== Bracket Matching ====================
+
+    /// Finds the matching bracket for the bracket at the given position.
+    /// Returns the position of the matching bracket, or None if not found.
+    pub fn find_matching_bracket(&self, pos: usize) -> Option<usize> {
+        let ch = self.buffer.char_at(pos)?;
+        let bracket_pairs = self.highlighter.language().bracket_pairs();
+
+        // Check if character is an opening bracket
+        for &(open, close) in bracket_pairs {
+            if ch == open {
+                return self.find_closing_bracket(pos, open, close);
+            } else if ch == close {
+                return self.find_opening_bracket(pos, open, close);
+            }
+        }
+        None
+    }
+
+    /// Finds the closing bracket starting from pos.
+    fn find_closing_bracket(&self, start: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 1;
+        let mut pos = start + 1;
+
+        while pos < self.buffer.len_chars() && depth > 0 {
+            if let Some(ch) = self.buffer.char_at(pos) {
+                if ch == open {
+                    depth += 1;
+                } else if ch == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(pos);
+                    }
+                }
+            }
+            pos += 1;
+        }
+        None
+    }
+
+    /// Finds the opening bracket starting from pos.
+    fn find_opening_bracket(&self, start: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 1;
+        let mut pos = start;
+
+        while pos > 0 && depth > 0 {
+            pos -= 1;
+            if let Some(ch) = self.buffer.char_at(pos) {
+                if ch == close {
+                    depth += 1;
+                } else if ch == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(pos);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the matching bracket position for the current cursor position.
+    /// Checks both the character at cursor and the character before cursor.
+    pub fn matching_bracket_at_cursor(&self) -> Option<(usize, usize)> {
+        let pos = self.cursor.position();
+
+        // Check character at cursor position
+        if let Some(match_pos) = self.find_matching_bracket(pos) {
+            return Some((pos, match_pos));
+        }
+
+        // Check character before cursor
+        if pos > 0 {
+            if let Some(match_pos) = self.find_matching_bracket(pos - 1) {
+                return Some((pos - 1, match_pos));
+            }
+        }
+
+        None
+    }
+
+    /// Inserts a character with auto-close bracket support.
+    pub fn insert_char_with_auto_bracket(&mut self, ch: char) {
+        let bracket_pairs = self.highlighter.language().bracket_pairs();
+
+        // Check if this is an opening bracket
+        for &(open, close) in bracket_pairs {
+            if ch == open {
+                // Insert both opening and closing bracket
+                self.begin_edit();
+                self.delete_selection_internal();
+
+                let pos = self.cursor.position();
+                let pair = format!("{}{}", open, close);
+                self.buffer.insert(pos, &pair);
+                self.history.record(EditOperation::Insert {
+                    position: pos,
+                    text: pair,
+                });
+
+                // Position cursor between brackets
+                self.cursor.set_position(pos + 1, false);
+                self.finish_edit();
+                self.scroll_to_cursor();
+                return;
+            }
+
+            // If typing a closing bracket and the next char is the same closing bracket, just skip
+            if ch == close {
+                let pos = self.cursor.position();
+                if let Some(next_ch) = self.buffer.char_at(pos) {
+                    if next_ch == close {
+                        self.cursor.set_position(pos + 1, false);
+                        self.scroll_to_cursor();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Default: insert character normally
+        self.insert_char(ch);
     }
 
     // ==================== Selection ====================

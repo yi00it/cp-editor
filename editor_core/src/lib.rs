@@ -6,6 +6,7 @@
 pub mod buffer;
 pub mod cursor;
 pub mod editor;
+pub mod fold;
 pub mod history;
 pub mod lsp_types;
 pub mod search;
@@ -15,6 +16,7 @@ pub mod workspace;
 pub use buffer::TextBuffer;
 pub use cursor::{BlockSelection, Cursor, MultiCursor, Position, Selection, SelectionMode};
 pub use editor::Editor;
+pub use fold::{FoldManager, FoldRegion};
 pub use history::{EditOperation, History};
 pub use lsp_types::{CompletionItem, CompletionKind, Diagnostic, DiagnosticSeverity, HoverInfo};
 pub use search::{Search, SearchMatch};

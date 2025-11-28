@@ -35,6 +35,9 @@ env_logger = "0.10"
 # File dialogs
 rfd = "0.15"
 
+# Clipboard
+arboard = "3.4"
+
 # Syntax highlighting
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"

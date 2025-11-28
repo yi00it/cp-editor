@@ -877,6 +877,30 @@ impl EditorApp {
             }
         }
 
+        // Draw bracket match highlighting
+        if let Some((bracket_pos, match_pos)) = editor.matching_bracket_at_cursor() {
+            // Helper to draw bracket highlight at a position
+            let draw_bracket_highlight = |renderer: &mut GpuRenderer, char_pos: usize| {
+                let (line, col) = buffer.char_to_line_col(char_pos);
+                if line >= base_scroll_line
+                    && line <= base_scroll_line + visible_lines
+                    && col >= horizontal_scroll
+                {
+                    let screen_line = line as f32 - smooth_scroll;
+                    let screen_col = col - horizontal_scroll;
+                    let x = self.line_number_margin + screen_col as f32 * char_width;
+                    let y = content_y + screen_line * line_height;
+
+                    if y >= content_y && y < viewport_height as f32 {
+                        renderer.draw_rect(x, y, char_width, line_height, renderer.colors.bracket_match);
+                    }
+                }
+            };
+
+            draw_bracket_highlight(renderer, bracket_pos);
+            draw_bracket_highlight(renderer, match_pos);
+        }
+
         // Draw all cursors (multi-cursor support)
         if self.cursor_visible {
             for (cursor_line, cursor_col) in &all_cursor_positions {
@@ -1747,7 +1771,12 @@ impl AppState {
             }
             EditorCommand::InsertChar(ch) => {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
-                    editor.insert_char(ch);
+                    // Use auto-bracket for opening brackets
+                    if matches!(ch, '(' | '[' | '{') {
+                        editor.insert_char_with_auto_bracket(ch);
+                    } else {
+                        editor.insert_char(ch);
+                    }
                 }
                 self.app.notify_lsp_document_change();
                 self.update_window_title();
@@ -2005,6 +2034,89 @@ impl AppState {
                 self.update_window_title();
                 false
             }
+            EditorCommand::Copy => {
+                if let Some(editor) = self.app.workspace.active_editor() {
+                    if let Some(text) = editor.get_selected_text() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if clipboard.set_text(&text).is_err() {
+                                self.app.notifications.error("Failed to copy to clipboard");
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            EditorCommand::Cut => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    if let Some(text) = editor.cut_selection() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if clipboard.set_text(&text).is_err() {
+                                self.app.notifications.error("Failed to copy to clipboard");
+                            }
+                        }
+                    }
+                }
+                self.app.notify_lsp_document_change();
+                self.update_window_title();
+                false
+            }
+            EditorCommand::Paste => {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() {
+                        if let Some(editor) = self.app.workspace.active_editor_mut() {
+                            editor.paste(&text);
+                        }
+                        self.app.notify_lsp_document_change();
+                        self.update_window_title();
+                    }
+                }
+                false
+            }
+            EditorCommand::ToggleComment => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.toggle_comment();
+                }
+                self.app.notify_lsp_document_change();
+                self.update_window_title();
+                false
+            }
+            EditorCommand::ToggleWordWrap => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.toggle_word_wrap();
+                    let state = if editor.word_wrap() { "enabled" } else { "disabled" };
+                    self.app.notifications.info(format!("Word wrap {}", state));
+                }
+                false
+            }
+            EditorCommand::ToggleFold => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    // Detect folds if not already done
+                    if editor.fold_manager().regions().is_empty() {
+                        editor.detect_folds();
+                    }
+                    if editor.toggle_fold_at_cursor() {
+                        let (line, _) = editor.buffer().char_to_line_col(editor.cursor_char_index());
+                        let state = if editor.is_line_folded(line) { "folded" } else { "unfolded" };
+                        self.app.notifications.info(format!("Code region {}", state));
+                    }
+                }
+                false
+            }
+            EditorCommand::FoldAll => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.detect_folds();
+                    editor.fold_all();
+                    self.app.notifications.info("All regions folded");
+                }
+                false
+            }
+            EditorCommand::UnfoldAll => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.unfold_all();
+                    self.app.notifications.info("All regions unfolded");
+                }
+                false
+            }
             EditorCommand::ScrollUp(lines) => {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     let current = editor.scroll_offset();
@@ -2204,6 +2316,8 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.set_visible_lines(visible_lines.max(1));
                     editor.set_visible_cols(visible_cols.max(1));
+                    // Update wrap width to match visible columns
+                    editor.set_wrap_width(visible_cols.max(10));
                 }
             }
         }

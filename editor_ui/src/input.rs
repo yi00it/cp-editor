@@ -121,6 +121,11 @@ pub enum EditorCommand {
     Undo,
     Redo,
 
+    // Clipboard
+    Copy,
+    Cut,
+    Paste,
+
     // Scrolling
     ScrollUp(f32),
     ScrollDown(f32),
@@ -138,6 +143,15 @@ pub enum EditorCommand {
     // LSP commands
     GotoDefinition,
     TriggerCompletion,
+
+    // Code editing
+    ToggleComment,
+    ToggleWordWrap,
+
+    // Code folding
+    ToggleFold,
+    FoldAll,
+    UnfoldAll,
 }
 
 /// Input handler that maps keyboard/mouse events to editor commands.
@@ -324,6 +338,12 @@ impl InputHandler {
             Key::Named(NamedKey::Space) if primary => Some(EditorCommand::TriggerCompletion),
             Key::Named(NamedKey::Space) => Some(EditorCommand::InsertChar(' ')),
 
+            // Alt shortcuts
+            Key::Character(ch) if alt && !primary => match ch.as_str() {
+                "z" | "Z" => Some(EditorCommand::ToggleWordWrap),
+                _ => None,
+            },
+
             // Character shortcuts
             Key::Character(ch) if primary => match ch.as_str() {
                 "s" | "S" if shift => Some(EditorCommand::SaveAs),
@@ -338,6 +358,16 @@ impl InputHandler {
                 "a" | "A" => Some(EditorCommand::SelectAll),
                 "d" | "D" => Some(EditorCommand::DuplicateLine),
                 "b" | "B" if shift => Some(EditorCommand::ToggleBlockSelection),
+                // Clipboard
+                "c" | "C" => Some(EditorCommand::Copy),
+                "x" | "X" => Some(EditorCommand::Cut),
+                "v" | "V" => Some(EditorCommand::Paste),
+                // Comment toggle
+                "/" => Some(EditorCommand::ToggleComment),
+                // Code folding
+                "[" if shift => Some(EditorCommand::FoldAll),
+                "]" if shift => Some(EditorCommand::UnfoldAll),
+                "[" => Some(EditorCommand::ToggleFold),
                 // Search & Navigation
                 "f" | "F" => Some(EditorCommand::OpenSearch),
                 "h" | "H" => Some(EditorCommand::OpenReplace),

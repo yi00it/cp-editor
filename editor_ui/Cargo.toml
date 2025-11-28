@@ -16,3 +16,4 @@ fontdue.workspace = true
 log.workspace = true
 bytemuck = { version = "1.14", features = ["derive"] }
 rfd.workspace = true
+arboard.workspace = true

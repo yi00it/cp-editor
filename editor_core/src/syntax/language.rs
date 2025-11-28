@@ -95,6 +95,28 @@ impl Language {
             Self::PlainText => None,
         }
     }
+
+    /// Returns the line comment prefix for this language.
+    /// Returns None for languages without line comments (e.g., JSON).
+    pub fn line_comment(&self) -> Option<&'static str> {
+        match self {
+            Self::Rust => Some("//"),
+            Self::Python => Some("#"),
+            Self::JavaScript => Some("//"),
+            Self::TypeScript => Some("//"),
+            Self::C => Some("//"),
+            Self::Cpp => Some("//"),
+            Self::Json => None, // JSON doesn't support comments
+            Self::PlainText => Some("//"), // Default to C-style
+        }
+    }
+
+    /// Returns the bracket pairs for this language.
+    /// Used for bracket matching and auto-closing.
+    pub fn bracket_pairs(&self) -> &'static [(char, char)] {
+        // Most languages use the same bracket pairs
+        &[('(', ')'), ('[', ']'), ('{', '}')]
+    }
 }
 
 impl Default for Language {
