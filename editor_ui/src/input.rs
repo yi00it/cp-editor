@@ -124,6 +124,16 @@ pub enum EditorCommand {
     // Scrolling
     ScrollUp(f32),
     ScrollDown(f32),
+
+    // Search & Replace
+    OpenSearch,
+    OpenReplace,
+    FindNext,
+    FindPrev,
+    CloseSearch,
+
+    // Navigation
+    GoToLine,
 }
 
 /// Input handler that maps keyboard/mouse events to editor commands.
@@ -250,8 +260,15 @@ impl InputHandler {
                 }
             }
             Key::Named(NamedKey::Escape) => {
-                // Escape: Collapse multiple cursors to one
-                Some(EditorCommand::CollapseCursors)
+                // Escape: Close search or collapse multiple cursors to one
+                Some(EditorCommand::CloseSearch)
+            }
+            Key::Named(NamedKey::F3) => {
+                if shift {
+                    Some(EditorCommand::FindPrev)
+                } else {
+                    Some(EditorCommand::FindNext)
+                }
             }
             Key::Named(NamedKey::Home) => {
                 if primary {
@@ -315,6 +332,10 @@ impl InputHandler {
                 "a" | "A" => Some(EditorCommand::SelectAll),
                 "d" | "D" => Some(EditorCommand::DuplicateLine),
                 "b" | "B" if shift => Some(EditorCommand::ToggleBlockSelection),
+                // Search & Navigation
+                "f" | "F" => Some(EditorCommand::OpenSearch),
+                "h" | "H" => Some(EditorCommand::OpenReplace),
+                "g" | "G" => Some(EditorCommand::GoToLine),
                 // Tab switching with Ctrl+1-9
                 "1" => Some(EditorCommand::SwitchToTab(0)),
                 "2" => Some(EditorCommand::SwitchToTab(1)),

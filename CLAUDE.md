@@ -40,8 +40,9 @@ editor_desktop  →  editor_ui  →  editor_core
 | `editor_core/src/buffer.rs` | TextBuffer wrapper around ropey rope |
 | `editor_core/src/cursor.rs` | Cursor positioning and selection |
 | `editor_core/src/history.rs` | Undo/redo system |
+| `editor_core/src/search.rs` | Search and replace functionality |
 | `editor_core/src/workspace.rs` | Multi-buffer/tab workspace management |
-| `editor_ui/src/app.rs` | EditorApp (event handling, state, tab bar) |
+| `editor_ui/src/app.rs` | EditorApp (event handling, state, tab bar, search UI) |
 | `editor_ui/src/gpu_renderer.rs` | GPU rendering pipeline |
 | `editor_ui/src/input.rs` | Keyboard/mouse handling |
 
@@ -71,6 +72,12 @@ editor_desktop  →  editor_ui  →  editor_core
 | Add Cursor Above | Ctrl+Alt+Up | Cmd+Alt+Up |
 | Add Cursor Below | Ctrl+Alt+Down | Cmd+Alt+Down |
 | Collapse Cursors | Escape | Escape |
+| Find | Ctrl+F | Cmd+F |
+| Find Next | F3 / Enter | F3 / Enter |
+| Find Previous | Shift+F3 | Shift+F3 |
+| Replace | Ctrl+H | Cmd+H |
+| Go to Line | Ctrl+G | Cmd+G |
+| Close Search/Replace | Escape | Escape |
 
 ## Tech Stack
 

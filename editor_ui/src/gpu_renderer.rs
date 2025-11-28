@@ -17,6 +17,11 @@ pub struct Colors {
     pub tab_bar_bg: [f32; 4],
     pub tab_active_bg: [f32; 4],
     pub tab_inactive_bg: [f32; 4],
+    pub search_match: [f32; 4],
+    pub search_match_current: [f32; 4],
+    pub search_bar_bg: [f32; 4],
+    pub input_field_bg: [f32; 4],
+    pub input_field_border: [f32; 4],
 }
 
 impl Default for Colors {
@@ -31,6 +36,11 @@ impl Default for Colors {
             tab_bar_bg: [0.078, 0.078, 0.094, 1.0],    // #141418
             tab_active_bg: [0.102, 0.102, 0.122, 1.0], // #1A1A1F (same as background)
             tab_inactive_bg: [0.059, 0.059, 0.071, 1.0], // #0F0F12
+            search_match: [0.600, 0.500, 0.200, 0.4],  // Yellow-orange background
+            search_match_current: [0.800, 0.600, 0.200, 0.6], // Brighter for current match
+            search_bar_bg: [0.059, 0.059, 0.071, 1.0], // Same as inactive tab
+            input_field_bg: [0.102, 0.102, 0.122, 1.0], // Same as background
+            input_field_border: [0.302, 0.302, 0.322, 1.0], // Light gray border
         }
     }
 }

@@ -112,28 +112,28 @@ Goal: Add syntax awareness without destroying performance.
 
 ---
 
-## PHASE 5 – Search, Replace & Navigation
+## PHASE 5 – Search, Replace & Navigation ✓ DONE
 
 Goal: Make large files manageable.
 
 ### Search
-- [ ] Incremental search
-- [ ] Highlight matches
-- [ ] Jump between matches
-- [ ] Search across file
+- [x] Incremental search
+- [x] Highlight matches
+- [x] Jump between matches (F3 / Shift+F3)
+- [x] Search across file
 
 ### Replace
-- [ ] Replace current
-- [ ] Replace all
-- [ ] Confirmation step for large changes
+- [x] Replace current
+- [x] Replace all
+- [x] Confirmation step for large changes (Shift+Enter for replace all)
 
 ### Navigation
-- [ ] Go to line
-- [ ] Symbol outline (basic version)
-- [ ] Simple minimap (optional)
+- [x] Go to line (Ctrl+G)
+- [ ] Symbol outline (basic version) - *deferred to Phase 6 (LSP)*
+- [ ] Simple minimap (optional) - *deferred to Phase 7*
 
 **EXIT CRITERIA:**
-- Finding and modifying text is fast and reliable
+- Finding and modifying text is fast and reliable ✓
 
 ---
 

@@ -10,7 +10,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 /// Cursor blink interval in milliseconds.
@@ -18,6 +18,22 @@ const CURSOR_BLINK_INTERVAL_MS: u64 = 530;
 
 /// Tab bar height in pixels.
 const TAB_BAR_HEIGHT: f32 = 28.0;
+
+/// Search bar height in pixels.
+const SEARCH_BAR_HEIGHT: f32 = 32.0;
+
+/// Input mode for the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    /// Normal editing mode.
+    Normal,
+    /// Search mode (Ctrl+F).
+    Search,
+    /// Replace mode (Ctrl+H).
+    Replace,
+    /// Go to line mode (Ctrl+G).
+    GoToLine,
+}
 
 /// Pending dialog action after unsaved changes confirmation.
 #[derive(Debug, Clone)]
@@ -50,6 +66,16 @@ pub struct EditorApp {
     pub pending_action: Option<PendingAction>,
     /// Whether a file dialog is currently open.
     pub dialog_open: bool,
+    /// Current input mode.
+    pub input_mode: InputMode,
+    /// Search query text.
+    pub search_text: String,
+    /// Replace text.
+    pub replace_text: String,
+    /// Go to line text.
+    pub goto_text: String,
+    /// Which input field is focused (0 = search, 1 = replace).
+    pub focused_field: usize,
 }
 
 impl EditorApp {
@@ -69,7 +95,89 @@ impl EditorApp {
             cursor_blink_enabled: true,
             pending_action: None,
             dialog_open: false,
+            input_mode: InputMode::Normal,
+            search_text: String::new(),
+            replace_text: String::new(),
+            goto_text: String::new(),
+            focused_field: 0,
         }
+    }
+
+    /// Opens the search bar.
+    pub fn open_search(&mut self) {
+        self.input_mode = InputMode::Search;
+        self.focused_field = 0;
+        // Pre-fill with selection if any
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(selected) = editor.selected_text() {
+                if !selected.contains('\n') {
+                    self.search_text = selected;
+                }
+            }
+        }
+        // Perform search immediately if there's text
+        if !self.search_text.is_empty() {
+            if let Some(editor) = self.workspace.active_editor_mut() {
+                editor.find(&self.search_text);
+            }
+        }
+    }
+
+    /// Opens the replace bar.
+    pub fn open_replace(&mut self) {
+        self.input_mode = InputMode::Replace;
+        self.focused_field = 0;
+        // Pre-fill with selection if any
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(selected) = editor.selected_text() {
+                if !selected.contains('\n') {
+                    self.search_text = selected;
+                }
+            }
+        }
+        // Perform search immediately if there's text
+        if !self.search_text.is_empty() {
+            if let Some(editor) = self.workspace.active_editor_mut() {
+                editor.find(&self.search_text);
+            }
+        }
+    }
+
+    /// Opens the go to line dialog.
+    pub fn open_goto_line(&mut self) {
+        self.input_mode = InputMode::GoToLine;
+        self.goto_text.clear();
+    }
+
+    /// Closes the search/replace/goto bar.
+    pub fn close_input_bar(&mut self) {
+        if self.input_mode != InputMode::Normal {
+            self.input_mode = InputMode::Normal;
+            // Clear search highlighting
+            if let Some(editor) = self.workspace.active_editor_mut() {
+                editor.clear_search();
+            }
+        } else {
+            // If already in normal mode, collapse cursors
+            if let Some(editor) = self.workspace.active_editor_mut() {
+                editor.collapse_cursors();
+                editor.exit_block_selection();
+            }
+        }
+    }
+
+    /// Returns true if in any input mode.
+    pub fn is_input_mode(&self) -> bool {
+        self.input_mode != InputMode::Normal
+    }
+
+    /// Returns the current content area Y offset (accounting for tab bar and search bar).
+    pub fn content_y_offset(&self) -> f32 {
+        let mut offset = TAB_BAR_HEIGHT;
+        if self.input_mode != InputMode::Normal {
+            offset += SEARCH_BAR_HEIGHT;
+        }
+        offset
     }
 
     /// Opens a file, creating a new tab.
@@ -109,8 +217,8 @@ impl EditorApp {
         char_width: f32,
         line_height: f32,
     ) -> (usize, usize) {
-        // Adjust y for tab bar
-        let y = y - TAB_BAR_HEIGHT;
+        // Adjust y for tab bar and search bar
+        let y = y - self.content_y_offset();
         if y < 0.0 {
             return (0, 0);
         }
@@ -144,6 +252,11 @@ impl EditorApp {
         y < TAB_BAR_HEIGHT
     }
 
+    /// Returns whether click is in search bar area.
+    pub fn is_in_search_bar(&self, y: f32) -> bool {
+        self.input_mode != InputMode::Normal && y >= TAB_BAR_HEIGHT && y < TAB_BAR_HEIGHT + SEARCH_BAR_HEIGHT
+    }
+
     /// Handles a click in the tab bar, returns the tab index if clicked on a tab.
     pub fn handle_tab_bar_click(&self, x: f32, char_width: f32) -> Option<usize> {
         let tabs = self.workspace.tabs();
@@ -170,6 +283,7 @@ impl EditorApp {
         let line_height = renderer.atlas().line_height;
         let char_width = renderer.atlas().char_width;
         let (viewport_width, viewport_height) = renderer.dimensions();
+        let content_y = self.content_y_offset();
 
         // Draw tab bar background
         renderer.draw_rect(
@@ -222,17 +336,22 @@ impl EditorApp {
             renderer.colors.line_number,
         );
 
+        // Draw search/replace/goto bar if active
+        if self.input_mode != InputMode::Normal {
+            self.render_input_bar(renderer, viewport_width as f32, char_width, line_height);
+        }
+
         // Get active editor for rendering
         let Some(editor) = self.workspace.active_editor() else {
             return;
         };
 
-        // Draw line number background (below tab bar)
+        // Draw line number background (below tab bar and search bar)
         renderer.draw_rect(
             0.0,
-            TAB_BAR_HEIGHT,
+            content_y,
             self.line_number_margin,
-            viewport_height as f32 - TAB_BAR_HEIGHT,
+            viewport_height as f32 - content_y,
             renderer.colors.line_number_bg,
         );
 
@@ -250,6 +369,10 @@ impl EditorApp {
         let cursor_pos = editor.cursor_position();
         let selection_range = editor.selected_range();
 
+        // Get search matches for visible lines
+        let search_matches = editor.search_matches_in_range(base_scroll_line, base_scroll_line + visible_lines);
+        let current_match = editor.current_search_match();
+
         // Draw visible lines
         for screen_line in 0..=visible_lines {
             let buffer_line = base_scroll_line + screen_line;
@@ -257,12 +380,49 @@ impl EditorApp {
                 break;
             }
 
-            // Apply fractional scroll offset, accounting for tab bar
-            let y = TAB_BAR_HEIGHT + (screen_line as f32 - scroll_frac) * line_height;
+            // Apply fractional scroll offset, accounting for tab bar and search bar
+            let y = content_y + (screen_line as f32 - scroll_frac) * line_height;
 
             // Draw line number
             let line_num_str = format!("{:>4}", buffer_line + 1);
             renderer.draw_text(&line_num_str, 4.0, y, renderer.colors.line_number);
+
+            // Draw search match highlights for this line
+            let line_start = buffer.line_start(buffer_line);
+            let line_end = buffer.line_end(buffer_line);
+            for m in &search_matches {
+                // Check if match overlaps this line
+                if m.start < line_end + 1 && m.end > line_start {
+                    let match_start_on_line = if m.start > line_start {
+                        m.start - line_start
+                    } else {
+                        0
+                    };
+                    let match_end_on_line = if m.end < line_end + 1 {
+                        m.end - line_start
+                    } else {
+                        line_end - line_start + 1
+                    };
+
+                    // Apply horizontal scroll offset
+                    let visible_match_start = match_start_on_line.saturating_sub(horizontal_scroll);
+                    let visible_match_end = match_end_on_line.saturating_sub(horizontal_scroll);
+
+                    if visible_match_end > visible_match_start {
+                        let match_x = self.line_number_margin + visible_match_start as f32 * char_width;
+                        let match_width = (visible_match_end - visible_match_start) as f32 * char_width;
+
+                        // Use brighter color for current match
+                        let color = if Some(*m) == current_match {
+                            renderer.colors.search_match_current
+                        } else {
+                            renderer.colors.search_match
+                        };
+
+                        renderer.draw_rect(match_x, y, match_width, line_height, color);
+                    }
+                }
+            }
 
             // Draw selection background for this line
             if let Some((sel_start, sel_end)) = selection_range {
@@ -332,12 +492,135 @@ impl EditorApp {
             let cursor_screen_line = cursor_pos.line as f32 - smooth_scroll;
             let cursor_screen_col = cursor_pos.col - horizontal_scroll;
             let cursor_x = self.line_number_margin + cursor_screen_col as f32 * char_width;
-            let cursor_y = TAB_BAR_HEIGHT + cursor_screen_line * line_height;
+            let cursor_y = content_y + cursor_screen_line * line_height;
 
             // Only draw if cursor is within visible area
-            if cursor_y >= TAB_BAR_HEIGHT && cursor_y < viewport_height as f32 {
+            if cursor_y >= content_y && cursor_y < viewport_height as f32 {
                 renderer.draw_rect(cursor_x, cursor_y, 2.0, line_height, renderer.colors.cursor);
             }
+        }
+    }
+
+    /// Renders the search/replace/goto input bar.
+    fn render_input_bar(&self, renderer: &mut GpuRenderer, viewport_width: f32, char_width: f32, line_height: f32) {
+        let bar_y = TAB_BAR_HEIGHT;
+
+        // Draw bar background
+        renderer.draw_rect(0.0, bar_y, viewport_width, SEARCH_BAR_HEIGHT, renderer.colors.search_bar_bg);
+
+        // Draw separator line
+        renderer.draw_rect(0.0, bar_y + SEARCH_BAR_HEIGHT - 1.0, viewport_width, 1.0, renderer.colors.line_number);
+
+        let padding = 8.0;
+        let field_height = 22.0;
+        let field_y = bar_y + (SEARCH_BAR_HEIGHT - field_height) / 2.0;
+        let text_y = field_y + (field_height - line_height) / 2.0;
+
+        match self.input_mode {
+            InputMode::Search => {
+                // Draw "Find:" label
+                renderer.draw_text("Find:", padding, text_y, renderer.colors.text);
+                let label_width = 5.0 * char_width + padding;
+
+                // Draw search input field
+                let field_x = label_width + padding;
+                let field_width = 200.0;
+                self.draw_input_field(renderer, field_x, field_y, field_width, field_height, &self.search_text, self.focused_field == 0, char_width, line_height);
+
+                // Draw status
+                if let Some(editor) = self.workspace.active_editor() {
+                    if let Some(status) = editor.search_status() {
+                        let status_x = field_x + field_width + padding;
+                        renderer.draw_text(&status, status_x, text_y, renderer.colors.line_number);
+                    }
+                }
+            }
+            InputMode::Replace => {
+                // Draw "Find:" label and field
+                renderer.draw_text("Find:", padding, text_y, renderer.colors.text);
+                let label_width = 5.0 * char_width + padding;
+                let field_x = label_width + padding;
+                let field_width = 150.0;
+                self.draw_input_field(renderer, field_x, field_y, field_width, field_height, &self.search_text, self.focused_field == 0, char_width, line_height);
+
+                // Draw "Replace:" label and field
+                let replace_label_x = field_x + field_width + padding * 2.0;
+                renderer.draw_text("Replace:", replace_label_x, text_y, renderer.colors.text);
+                let replace_field_x = replace_label_x + 8.0 * char_width + padding;
+                self.draw_input_field(renderer, replace_field_x, field_y, field_width, field_height, &self.replace_text, self.focused_field == 1, char_width, line_height);
+
+                // Draw status
+                if let Some(editor) = self.workspace.active_editor() {
+                    if let Some(status) = editor.search_status() {
+                        let status_x = replace_field_x + field_width + padding;
+                        renderer.draw_text(&status, status_x, text_y, renderer.colors.line_number);
+                    }
+                }
+            }
+            InputMode::GoToLine => {
+                // Draw "Go to line:" label
+                renderer.draw_text("Go to line:", padding, text_y, renderer.colors.text);
+                let label_width = 11.0 * char_width + padding;
+
+                // Draw input field
+                let field_x = label_width + padding;
+                let field_width = 80.0;
+                self.draw_input_field(renderer, field_x, field_y, field_width, field_height, &self.goto_text, true, char_width, line_height);
+
+                // Draw line count info
+                if let Some(editor) = self.workspace.active_editor() {
+                    let total_lines = editor.buffer().len_lines();
+                    let info = format!("of {}", total_lines);
+                    let info_x = field_x + field_width + padding;
+                    renderer.draw_text(&info, info_x, text_y, renderer.colors.line_number);
+                }
+            }
+            InputMode::Normal => {}
+        }
+    }
+
+    /// Draws an input field.
+    fn draw_input_field(
+        &self,
+        renderer: &mut GpuRenderer,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        text: &str,
+        focused: bool,
+        char_width: f32,
+        line_height: f32,
+    ) {
+        // Draw field background
+        renderer.draw_rect(x, y, width, height, renderer.colors.input_field_bg);
+
+        // Draw border (brighter if focused)
+        let border_color = if focused {
+            renderer.colors.text
+        } else {
+            renderer.colors.input_field_border
+        };
+        // Top border
+        renderer.draw_rect(x, y, width, 1.0, border_color);
+        // Bottom border
+        renderer.draw_rect(x, y + height - 1.0, width, 1.0, border_color);
+        // Left border
+        renderer.draw_rect(x, y, 1.0, height, border_color);
+        // Right border
+        renderer.draw_rect(x + width - 1.0, y, 1.0, height, border_color);
+
+        // Draw text
+        let text_x = x + 4.0;
+        let text_y = y + (height - line_height) / 2.0;
+        let max_chars = ((width - 8.0) / char_width) as usize;
+        let display_text: String = text.chars().take(max_chars).collect();
+        renderer.draw_text(&display_text, text_x, text_y, renderer.colors.text);
+
+        // Draw cursor if focused
+        if focused && self.cursor_visible {
+            let cursor_x = text_x + display_text.len() as f32 * char_width;
+            renderer.draw_rect(cursor_x, text_y, 2.0, line_height, renderer.colors.cursor);
         }
     }
 
@@ -534,8 +817,9 @@ impl AppState {
     }
 
     fn handle_mouse_drag(&mut self) {
-        // Don't drag in tab bar
-        if self.app.is_in_tab_bar(self.mouse_position.y as f32) {
+        // Don't drag in tab bar or search bar
+        if self.app.is_in_tab_bar(self.mouse_position.y as f32)
+            || self.app.is_in_search_bar(self.mouse_position.y as f32) {
             return;
         }
 
@@ -549,6 +833,110 @@ impl AppState {
             if let Some(editor) = self.app.workspace.active_editor_mut() {
                 editor.set_cursor_position(line, col, true);
             }
+        }
+    }
+
+    /// Handles keyboard input when in input mode (search/replace/goto).
+    /// Returns true if the key was handled.
+    fn handle_input_mode_key(&mut self, key: &Key, _event_loop: &ActiveEventLoop) -> bool {
+        match key {
+            Key::Named(NamedKey::Backspace) => {
+                match self.app.input_mode {
+                    InputMode::Search | InputMode::Replace if self.app.focused_field == 0 => {
+                        self.app.search_text.pop();
+                        // Update search incrementally
+                        if let Some(editor) = self.app.workspace.active_editor_mut() {
+                            editor.find(&self.app.search_text);
+                        }
+                    }
+                    InputMode::Replace if self.app.focused_field == 1 => {
+                        self.app.replace_text.pop();
+                    }
+                    InputMode::GoToLine => {
+                        self.app.goto_text.pop();
+                    }
+                    _ => {}
+                }
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                match self.app.input_mode {
+                    InputMode::Search => {
+                        // Find next on Enter
+                        if let Some(editor) = self.app.workspace.active_editor_mut() {
+                            editor.find_next();
+                        }
+                    }
+                    InputMode::Replace => {
+                        if self.app.focused_field == 0 {
+                            // Move to replace field
+                            self.app.focused_field = 1;
+                        } else {
+                            // Perform replacement
+                            if self.modifiers.shift_key() {
+                                // Replace all with Shift+Enter
+                                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                                    let count = editor.replace_all(&self.app.replace_text);
+                                    log::info!("Replaced {} occurrences", count);
+                                }
+                                self.update_window_title();
+                            } else {
+                                // Replace current
+                                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                                    editor.replace_current(&self.app.replace_text);
+                                }
+                                self.update_window_title();
+                            }
+                        }
+                    }
+                    InputMode::GoToLine => {
+                        // Go to the specified line
+                        if let Ok(line_num) = self.app.goto_text.parse::<usize>() {
+                            if let Some(editor) = self.app.workspace.active_editor_mut() {
+                                editor.go_to_line(line_num);
+                            }
+                            self.app.close_input_bar();
+                        }
+                    }
+                    _ => {}
+                }
+                true
+            }
+            Key::Named(NamedKey::Tab) => {
+                // Switch between search and replace fields
+                if self.app.input_mode == InputMode::Replace {
+                    self.app.focused_field = if self.app.focused_field == 0 { 1 } else { 0 };
+                }
+                true
+            }
+            Key::Character(ch) => {
+                if !self.modifiers.control_key() && !self.modifiers.alt_key() {
+                    if let Some(c) = ch.chars().next() {
+                        match self.app.input_mode {
+                            InputMode::Search | InputMode::Replace if self.app.focused_field == 0 => {
+                                self.app.search_text.push(c);
+                                // Update search incrementally
+                                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                                    editor.find(&self.app.search_text);
+                                }
+                            }
+                            InputMode::Replace if self.app.focused_field == 1 => {
+                                self.app.replace_text.push(c);
+                            }
+                            InputMode::GoToLine => {
+                                // Only allow digits
+                                if c.is_ascii_digit() {
+                                    self.app.goto_text.push(c);
+                                }
+                            }
+                            _ => {}
+                        }
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
         }
     }
 
@@ -870,6 +1258,34 @@ impl AppState {
                 }
                 false
             }
+            EditorCommand::OpenSearch => {
+                self.app.open_search();
+                false
+            }
+            EditorCommand::OpenReplace => {
+                self.app.open_replace();
+                false
+            }
+            EditorCommand::FindNext => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.find_next();
+                }
+                false
+            }
+            EditorCommand::FindPrev => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.find_prev();
+                }
+                false
+            }
+            EditorCommand::CloseSearch => {
+                self.app.close_input_bar();
+                false
+            }
+            EditorCommand::GoToLine => {
+                self.app.open_goto_line();
+                false
+            }
         }
     }
 
@@ -1037,29 +1453,63 @@ impl ApplicationHandler for AppState {
                 ..
             } => {
                 if state == ElementState::Pressed {
-                    if let Some(command) = self
-                        .app
-                        .input_handler
-                        .handle_key_event_new(&logical_key, state)
-                    {
-                        if self.execute_command(command, event_loop) {
-                            event_loop.exit();
+                    // Handle input mode (search/replace/goto) first
+                    if self.app.is_input_mode() {
+                        let handled = self.handle_input_mode_key(&logical_key, event_loop);
+                        if handled {
+                            self.app.reset_cursor_blink();
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        } else {
+                            // Check for commands that should work in input mode (Escape, F3)
+                            if let Some(command) = self
+                                .app
+                                .input_handler
+                                .handle_key_event_new(&logical_key, state)
+                            {
+                                match command {
+                                    EditorCommand::CloseSearch
+                                    | EditorCommand::FindNext
+                                    | EditorCommand::FindPrev => {
+                                        if self.execute_command(command, event_loop) {
+                                            event_loop.exit();
+                                        }
+                                        self.app.reset_cursor_blink();
+                                        if let Some(window) = &self.window {
+                                            window.request_redraw();
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
-                        self.app.reset_cursor_blink();
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
+                    } else {
+                        // Normal mode - regular command handling
+                        if let Some(command) = self
+                            .app
+                            .input_handler
+                            .handle_key_event_new(&logical_key, state)
+                        {
+                            if self.execute_command(command, event_loop) {
+                                event_loop.exit();
+                            }
+                            self.app.reset_cursor_blink();
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
                         }
-                    }
 
-                    // Handle character input for text
-                    if let Key::Character(ch) = &logical_key {
-                        if !self.modifiers.control_key() && !self.modifiers.alt_key() {
-                            if let Some(c) = ch.chars().next() {
-                                if let Some(command) = self.app.input_handler.handle_char_input(c) {
-                                    self.execute_command(command, event_loop);
-                                    self.app.reset_cursor_blink();
-                                    if let Some(window) = &self.window {
-                                        window.request_redraw();
+                        // Handle character input for text
+                        if let Key::Character(ch) = &logical_key {
+                            if !self.modifiers.control_key() && !self.modifiers.alt_key() {
+                                if let Some(c) = ch.chars().next() {
+                                    if let Some(command) = self.app.input_handler.handle_char_input(c) {
+                                        self.execute_command(command, event_loop);
+                                        self.app.reset_cursor_blink();
+                                        if let Some(window) = &self.window {
+                                            window.request_redraw();
+                                        }
                                     }
                                 }
                             }

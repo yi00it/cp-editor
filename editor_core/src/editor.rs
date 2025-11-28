@@ -3,6 +3,7 @@
 use crate::buffer::TextBuffer;
 use crate::cursor::{Cursor, MultiCursor, Position};
 use crate::history::{EditOperation, History};
+use crate::search::{Search, SearchMatch};
 use crate::syntax::{Language, SyntaxHighlighter};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,8 @@ pub struct Editor {
     horizontal_scroll: usize,
     /// Syntax highlighter.
     highlighter: SyntaxHighlighter,
+    /// Search state.
+    search: Search,
 }
 
 impl Default for Editor {
@@ -60,6 +63,7 @@ impl Editor {
             smooth_scroll: 0.0,
             horizontal_scroll: 0,
             highlighter: SyntaxHighlighter::new(),
+            search: Search::new(),
         }
     }
 
@@ -959,6 +963,240 @@ impl Editor {
     /// Returns true if syntax highlighting is available.
     pub fn has_syntax_highlighting(&self) -> bool {
         self.highlighter.has_highlighting()
+    }
+
+    // ==================== Search & Replace ====================
+
+    /// Returns a reference to the search state.
+    pub fn search(&self) -> &Search {
+        &self.search
+    }
+
+    /// Performs a search with the given query.
+    /// Returns the number of matches found.
+    pub fn find(&mut self, query: &str) -> usize {
+        let count = self.search.set_query(query, &self.buffer);
+        // Jump to the first match near cursor
+        if let Some(match_) = self.search.find_nearest(self.cursor.position()) {
+            self.jump_to_match(match_);
+        }
+        count
+    }
+
+    /// Clears the current search.
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+    }
+
+    /// Returns true if there is an active search.
+    pub fn has_search(&self) -> bool {
+        self.search.is_active()
+    }
+
+    /// Moves to the next search match.
+    /// Returns true if a match was found.
+    pub fn find_next(&mut self) -> bool {
+        if let Some(match_) = self.search.next_match() {
+            self.jump_to_match(match_);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Moves to the previous search match.
+    /// Returns true if a match was found.
+    pub fn find_prev(&mut self) -> bool {
+        if let Some(match_) = self.search.prev_match() {
+            self.jump_to_match(match_);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Jumps to the given search match position.
+    fn jump_to_match(&mut self, match_: SearchMatch) {
+        // Set cursor to the start of the match
+        self.cursor.set_position(match_.start, false);
+        // Select the match
+        self.cursor.set_position(match_.end, true);
+        self.scroll_to_cursor();
+    }
+
+    /// Returns the current search matches visible in the given line range.
+    pub fn search_matches_in_range(&self, start_line: usize, end_line: usize) -> Vec<SearchMatch> {
+        self.search.matches_in_range(&self.buffer, start_line, end_line)
+    }
+
+    /// Returns all search matches.
+    pub fn search_matches(&self) -> &[SearchMatch] {
+        self.search.matches()
+    }
+
+    /// Returns the current (highlighted) search match.
+    pub fn current_search_match(&self) -> Option<SearchMatch> {
+        self.search.current_match()
+    }
+
+    /// Returns search status string like "1 of 5".
+    pub fn search_status(&self) -> Option<String> {
+        if !self.search.is_active() {
+            return None;
+        }
+        let count = self.search.match_count();
+        if count == 0 {
+            return Some("No results".to_string());
+        }
+        if let Some(current) = self.search.current_match_index() {
+            Some(format!("{} of {}", current, count))
+        } else {
+            Some(format!("{} results", count))
+        }
+    }
+
+    /// Toggles case sensitivity for search.
+    pub fn toggle_search_case_sensitive(&mut self) {
+        self.search.toggle_case_sensitive(&self.buffer);
+        // Re-jump to nearest match if any
+        if let Some(match_) = self.search.find_nearest(self.cursor.position()) {
+            self.jump_to_match(match_);
+        }
+    }
+
+    /// Replaces the current search match with the given replacement text.
+    /// Returns true if a replacement was made.
+    pub fn replace_current(&mut self, replacement: &str) -> bool {
+        let Some(match_) = self.search.current_match() else {
+            return false;
+        };
+
+        self.begin_edit();
+
+        // Delete the match text
+        let mut deleted = String::new();
+        for i in match_.start..match_.end {
+            if let Some(ch) = self.buffer.char_at(i) {
+                deleted.push(ch);
+            }
+        }
+        self.buffer.remove(match_.start, match_.end);
+        self.history.record(EditOperation::Delete {
+            position: match_.start,
+            text: deleted,
+        });
+
+        // Insert the replacement
+        self.buffer.insert(match_.start, replacement);
+        self.history.record(EditOperation::Insert {
+            position: match_.start,
+            text: replacement.to_string(),
+        });
+
+        // Move cursor after the replacement
+        self.cursor.set_position(match_.start + replacement.len(), false);
+
+        self.finish_edit();
+
+        // Refresh search to update matches
+        self.search.refresh(&self.buffer);
+
+        // Jump to next match if available
+        if let Some(next) = self.search.current_match() {
+            self.jump_to_match(next);
+        }
+
+        true
+    }
+
+    /// Replaces all search matches with the given replacement text.
+    /// Returns the number of replacements made.
+    pub fn replace_all(&mut self, replacement: &str) -> usize {
+        let matches: Vec<_> = self.search.matches().to_vec();
+        if matches.is_empty() {
+            return 0;
+        }
+
+        self.begin_edit();
+
+        let replacement_len = replacement.len();
+        let mut offset: isize = 0;
+
+        for m in &matches {
+            // Adjust position based on previous replacements
+            let adjusted_start = (m.start as isize + offset) as usize;
+            let adjusted_end = (m.end as isize + offset) as usize;
+
+            // Delete the match text
+            let mut deleted = String::new();
+            for i in adjusted_start..adjusted_end {
+                if let Some(ch) = self.buffer.char_at(i) {
+                    deleted.push(ch);
+                }
+            }
+            self.buffer.remove(adjusted_start, adjusted_end);
+            self.history.record(EditOperation::Delete {
+                position: adjusted_start,
+                text: deleted,
+            });
+
+            // Insert the replacement
+            self.buffer.insert(adjusted_start, replacement);
+            self.history.record(EditOperation::Insert {
+                position: adjusted_start,
+                text: replacement.to_string(),
+            });
+
+            // Update offset for subsequent replacements
+            offset += replacement_len as isize - m.len() as isize;
+        }
+
+        let count = matches.len();
+
+        self.finish_edit();
+
+        // Clear search after replace all
+        self.search.clear();
+
+        count
+    }
+
+    // ==================== Go to Line ====================
+
+    /// Moves the cursor to the specified line number (1-based).
+    /// Returns true if the line exists.
+    pub fn go_to_line(&mut self, line_number: usize) -> bool {
+        if line_number == 0 {
+            return false;
+        }
+
+        let line_idx = line_number - 1; // Convert to 0-based
+        if line_idx >= self.buffer.len_lines() {
+            return false;
+        }
+
+        let line_start = self.buffer.line_start(line_idx);
+        self.cursor.set_position(line_start, false);
+        self.scroll_to_cursor();
+        true
+    }
+
+    /// Moves the cursor to the specified line and column (both 1-based).
+    pub fn go_to_line_col(&mut self, line_number: usize, col_number: usize) -> bool {
+        if line_number == 0 {
+            return false;
+        }
+
+        let line_idx = line_number - 1;
+        if line_idx >= self.buffer.len_lines() {
+            return false;
+        }
+
+        let col_idx = col_number.saturating_sub(1);
+        let char_pos = self.buffer.line_col_to_char(line_idx, col_idx);
+        self.cursor.set_position(char_pos, false);
+        self.scroll_to_cursor();
+        true
     }
 }
 

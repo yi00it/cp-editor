@@ -7,6 +7,7 @@ pub mod buffer;
 pub mod cursor;
 pub mod editor;
 pub mod history;
+pub mod search;
 pub mod syntax;
 pub mod workspace;
 
@@ -14,5 +15,6 @@ pub use buffer::TextBuffer;
 pub use cursor::{BlockSelection, Cursor, MultiCursor, Position, Selection, SelectionMode};
 pub use editor::Editor;
 pub use history::{EditOperation, History};
+pub use search::{Search, SearchMatch};
 pub use syntax::{Language, SyntaxHighlighter, Theme, TokenStyle};
 pub use workspace::{BufferId, TabInfo, Workspace};
