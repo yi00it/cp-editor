@@ -1,6 +1,5 @@
 //! Input handling and key mapping.
 
-use cp_editor_core::Editor;
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -55,7 +54,16 @@ impl ImeState {
 pub enum EditorCommand {
     // File operations
     Save,
+    SaveAs,
+    OpenFile,
+    NewFile,
+    CloseTab,
     Quit,
+
+    // Tab operations
+    NextTab,
+    PrevTab,
+    SwitchToTab(usize),
 
     // Text input
     InsertChar(char),
@@ -233,17 +241,34 @@ impl InputHandler {
                     Some(EditorCommand::MovePageDown)
                 }
             }
+            // Tab navigation (must come before generic Tab handling)
+            Key::Named(NamedKey::Tab) if primary && shift => Some(EditorCommand::PrevTab),
+            Key::Named(NamedKey::Tab) if primary => Some(EditorCommand::NextTab),
             Key::Named(NamedKey::Tab) => Some(EditorCommand::InsertChar('\t')),
             Key::Named(NamedKey::Space) => Some(EditorCommand::InsertChar(' ')),
 
             // Character shortcuts
             Key::Character(ch) if primary => match ch.as_str() {
+                "s" if shift => Some(EditorCommand::SaveAs),
                 "s" | "S" => Some(EditorCommand::Save),
+                "o" | "O" => Some(EditorCommand::OpenFile),
+                "n" | "N" => Some(EditorCommand::NewFile),
+                "w" | "W" => Some(EditorCommand::CloseTab),
                 "q" | "Q" => Some(EditorCommand::Quit),
                 "z" => Some(EditorCommand::Undo),
                 "Z" => Some(EditorCommand::Redo),
                 "y" | "Y" => Some(EditorCommand::Redo),
                 "a" | "A" => Some(EditorCommand::SelectAll),
+                // Tab switching with Ctrl+1-9
+                "1" => Some(EditorCommand::SwitchToTab(0)),
+                "2" => Some(EditorCommand::SwitchToTab(1)),
+                "3" => Some(EditorCommand::SwitchToTab(2)),
+                "4" => Some(EditorCommand::SwitchToTab(3)),
+                "5" => Some(EditorCommand::SwitchToTab(4)),
+                "6" => Some(EditorCommand::SwitchToTab(5)),
+                "7" => Some(EditorCommand::SwitchToTab(6)),
+                "8" => Some(EditorCommand::SwitchToTab(7)),
+                "9" => Some(EditorCommand::SwitchToTab(8)),
                 _ => None,
             },
 
@@ -272,142 +297,6 @@ impl InputHandler {
                     None
                 }
             }
-        }
-    }
-}
-
-pub fn execute_command(editor: &mut Editor, command: EditorCommand) -> bool {
-    match command {
-        EditorCommand::Save => {
-            if let Err(e) = editor.save() {
-                log::error!("Failed to save: {}", e);
-            }
-            false
-        }
-        EditorCommand::Quit => true,
-
-        EditorCommand::InsertChar(ch) => {
-            editor.insert_char(ch);
-            false
-        }
-        EditorCommand::InsertNewline => {
-            editor.insert_newline();
-            false
-        }
-
-        EditorCommand::DeleteBackward => {
-            editor.delete_backward();
-            false
-        }
-        EditorCommand::DeleteForward => {
-            editor.delete_forward();
-            false
-        }
-
-        EditorCommand::MoveLeft => {
-            editor.move_left(false);
-            false
-        }
-        EditorCommand::MoveRight => {
-            editor.move_right(false);
-            false
-        }
-        EditorCommand::MoveUp => {
-            editor.move_up(false);
-            false
-        }
-        EditorCommand::MoveDown => {
-            editor.move_down(false);
-            false
-        }
-        EditorCommand::MoveToLineStart => {
-            editor.move_to_line_start(false);
-            false
-        }
-        EditorCommand::MoveToLineEnd => {
-            editor.move_to_line_end(false);
-            false
-        }
-        EditorCommand::MovePageUp => {
-            editor.move_page_up(false);
-            false
-        }
-        EditorCommand::MovePageDown => {
-            editor.move_page_down(false);
-            false
-        }
-        EditorCommand::MoveToBufferStart => {
-            editor.move_to_buffer_start(false);
-            false
-        }
-        EditorCommand::MoveToBufferEnd => {
-            editor.move_to_buffer_end(false);
-            false
-        }
-
-        EditorCommand::SelectLeft => {
-            editor.move_left(true);
-            false
-        }
-        EditorCommand::SelectRight => {
-            editor.move_right(true);
-            false
-        }
-        EditorCommand::SelectUp => {
-            editor.move_up(true);
-            false
-        }
-        EditorCommand::SelectDown => {
-            editor.move_down(true);
-            false
-        }
-        EditorCommand::SelectToLineStart => {
-            editor.move_to_line_start(true);
-            false
-        }
-        EditorCommand::SelectToLineEnd => {
-            editor.move_to_line_end(true);
-            false
-        }
-        EditorCommand::SelectPageUp => {
-            editor.move_page_up(true);
-            false
-        }
-        EditorCommand::SelectPageDown => {
-            editor.move_page_down(true);
-            false
-        }
-        EditorCommand::SelectToBufferStart => {
-            editor.move_to_buffer_start(true);
-            false
-        }
-        EditorCommand::SelectToBufferEnd => {
-            editor.move_to_buffer_end(true);
-            false
-        }
-        EditorCommand::SelectAll => {
-            editor.select_all();
-            false
-        }
-
-        EditorCommand::Undo => {
-            editor.undo();
-            false
-        }
-        EditorCommand::Redo => {
-            editor.redo();
-            false
-        }
-
-        EditorCommand::ScrollUp(lines) => {
-            let current = editor.scroll_offset();
-            editor.set_scroll_offset(current.saturating_sub(lines as usize));
-            false
-        }
-        EditorCommand::ScrollDown(lines) => {
-            let current = editor.scroll_offset();
-            editor.set_scroll_offset(current + lines as usize);
-            false
         }
     }
 }

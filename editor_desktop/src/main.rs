@@ -4,6 +4,7 @@
 
 use cp_editor_ui::{run, EditorApp};
 use std::env;
+use std::path::PathBuf;
 
 fn main() {
     // Initialize logging
@@ -13,16 +14,16 @@ fn main() {
 
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
-    let file_path = args.get(1).cloned();
+    let file_path = args.get(1).map(PathBuf::from);
 
     // Create the application
     let mut app = EditorApp::new(16.0);
 
-    // Open file if provided
+    // Open file if provided (replaces the default empty buffer)
     if let Some(path) = file_path {
-        log::info!("Opening file: {}", path);
-        if let Err(e) = app.editor.open_file(&path) {
-            log::error!("Failed to open file '{}': {}", path, e);
+        log::info!("Opening file: {:?}", path);
+        if let Err(e) = app.workspace.open_file_in_current(&path) {
+            log::error!("Failed to open file '{:?}': {}", path, e);
         }
     }
 

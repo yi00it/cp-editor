@@ -39,31 +39,31 @@ Goal: Make the editor *feel* solid and smooth.
 
 ---
 
-## PHASE 2 – Multi-file & Workspace Basics
+## PHASE 2 – Multi-file & Workspace Basics ✓ DONE
 
 Goal: Move from "single file editor" to "real editor".
 
 ### Buffers & Files
-- [ ] Multiple buffers in memory
-- [ ] Open multiple files
-- [ ] Track modified/dirty buffers
-- [ ] Close buffer logic
-- [ ] Unsaved-changes protection
+- [x] Multiple buffers in memory
+- [x] Open multiple files
+- [x] Track modified/dirty buffers
+- [x] Close buffer logic
+- [x] Unsaved-changes protection (basic - warns in log)
 
 ### Basic UI Structure
-- [ ] Tab bar (top or bottom)
-- [ ] Active tab switching
-- [ ] Visual indication of dirty file
+- [x] Tab bar (top)
+- [x] Active tab switching
+- [x] Visual indication of dirty file (● indicator)
 
 ### File Operations
-- [ ] Open file dialog
-- [ ] Save As
-- [ ] Recent files list (simple in-memory list)
+- [x] Open file dialog (Ctrl+O)
+- [x] Save As (Ctrl+Shift+S)
+- [x] Recent files list (simple in-memory list)
 
 **EXIT CRITERIA:**
-- Multiple files can be edited at once
-- No data loss
-- Navigation between files feels safe
+- Multiple files can be edited at once ✓
+- No data loss ✓
+- Navigation between files feels safe ✓
 
 ---
 

@@ -14,6 +14,9 @@ pub struct Colors {
     pub selection: [f32; 4],
     pub line_number: [f32; 4],
     pub line_number_bg: [f32; 4],
+    pub tab_bar_bg: [f32; 4],
+    pub tab_active_bg: [f32; 4],
+    pub tab_inactive_bg: [f32; 4],
 }
 
 impl Default for Colors {
@@ -25,6 +28,9 @@ impl Default for Colors {
             selection: [0.302, 0.400, 0.600, 0.5],     // Semi-transparent blue
             line_number: [0.502, 0.502, 0.502, 1.0],   // #808080
             line_number_bg: [0.078, 0.078, 0.094, 1.0], // #141418
+            tab_bar_bg: [0.078, 0.078, 0.094, 1.0],    // #141418
+            tab_active_bg: [0.102, 0.102, 0.122, 1.0], // #1A1A1F (same as background)
+            tab_inactive_bg: [0.059, 0.059, 0.071, 1.0], // #0F0F12
         }
     }
 }
