@@ -301,11 +301,25 @@ impl EditorApp {
                 }
             }
 
-            // Draw line text
+            // Draw line text with syntax highlighting
             if let Some(line_text) = buffer.line(buffer_line) {
-                let visible_text: String = line_text.chars().skip(horizontal_scroll).collect();
                 let x = self.line_number_margin;
-                renderer.draw_text(&visible_text, x, y, renderer.colors.text);
+                let char_width = renderer.atlas().char_width;
+
+                // Check if syntax highlighting is available
+                if editor.has_syntax_highlighting() {
+                    // Draw each character with its highlight color
+                    for (i, ch) in line_text.chars().skip(horizontal_scroll).enumerate() {
+                        let col = horizontal_scroll + i;
+                        let color = editor.highlight_color_at(buffer_line, col);
+                        let char_x = x + i as f32 * char_width;
+                        renderer.draw_char(ch, char_x, y, color);
+                    }
+                } else {
+                    // No highlighting, draw with default color
+                    let visible_text: String = line_text.chars().skip(horizontal_scroll).collect();
+                    renderer.draw_text(&visible_text, x, y, renderer.colors.text);
+                }
             }
         }
 
@@ -643,9 +657,27 @@ impl AppState {
                 }
                 false
             }
+            EditorCommand::MoveWordLeft => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_word_left(false);
+                }
+                false
+            }
+            EditorCommand::MoveWordRight => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_word_right(false);
+                }
+                false
+            }
             EditorCommand::MoveToLineStart => {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.move_to_line_start(false);
+                }
+                false
+            }
+            EditorCommand::MoveToLineStartSmart => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_to_line_start_smart(false);
                 }
                 false
             }
@@ -703,9 +735,27 @@ impl AppState {
                 }
                 false
             }
+            EditorCommand::SelectWordLeft => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_word_left(true);
+                }
+                false
+            }
+            EditorCommand::SelectWordRight => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_word_right(true);
+                }
+                false
+            }
             EditorCommand::SelectToLineStart => {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.move_to_line_start(true);
+                }
+                false
+            }
+            EditorCommand::SelectToLineStartSmart => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_to_line_start_smart(true);
                 }
                 false
             }
@@ -742,6 +792,53 @@ impl AppState {
             EditorCommand::SelectAll => {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.select_all();
+                }
+                false
+            }
+            EditorCommand::DuplicateLine => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.duplicate_line();
+                }
+                self.update_window_title();
+                false
+            }
+            EditorCommand::MoveLineUp => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_line_up();
+                }
+                self.update_window_title();
+                false
+            }
+            EditorCommand::MoveLineDown => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.move_line_down();
+                }
+                self.update_window_title();
+                false
+            }
+            EditorCommand::ToggleBlockSelection => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.toggle_block_selection();
+                }
+                false
+            }
+            EditorCommand::AddCursorAbove => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.add_cursor_above();
+                }
+                false
+            }
+            EditorCommand::AddCursorBelow => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.add_cursor_below();
+                }
+                false
+            }
+            EditorCommand::CollapseCursors => {
+                if let Some(editor) = self.app.workspace.active_editor_mut() {
+                    editor.collapse_cursors();
+                    // Also exit block selection mode
+                    editor.exit_block_selection();
                 }
                 false
             }
@@ -788,13 +885,18 @@ impl AppState {
 
         self.app.dialog_open = false;
 
-        if let Some(path) = dialog {
-            if let Err(e) = self.app.workspace.open_file(&path) {
-                log::error!("Failed to open file: {}", e);
+        match dialog {
+            Some(path) => {
+                if let Err(e) = self.app.workspace.open_file(&path) {
+                    log::error!("Failed to open file: {}", e);
+                }
+                self.update_window_title();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
-            self.update_window_title();
-            if let Some(window) = &self.window {
-                window.request_redraw();
+            None => {
+                log::info!("Open file dialog cancelled or unavailable (try: apt install zenity)");
             }
         }
     }
@@ -811,13 +913,18 @@ impl AppState {
 
         self.app.dialog_open = false;
 
-        if let Some(path) = dialog {
-            if let Err(e) = self.app.workspace.save_active_as(&path) {
-                log::error!("Failed to save file: {}", e);
+        match dialog {
+            Some(path) => {
+                if let Err(e) = self.app.workspace.save_active_as(&path) {
+                    log::error!("Failed to save file: {}", e);
+                }
+                self.update_window_title();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
-            self.update_window_title();
-            if let Some(window) = &self.window {
-                window.request_redraw();
+            None => {
+                log::info!("Save dialog cancelled or unavailable (try: apt install zenity)");
             }
         }
     }
@@ -1042,12 +1149,18 @@ impl ApplicationHandler for AppState {
                 // Update cursor blink
                 let blink_needs_redraw = self.app.update_cursor_blink();
 
-                // Update smooth scroll animation
+                // Update smooth scroll animation and syntax highlighting cache
                 let scroll_needs_redraw = self
                     .app
                     .workspace
                     .active_editor_mut()
-                    .map(|e| e.update_smooth_scroll())
+                    .map(|e| {
+                        // Ensure syntax highlighting cache is up to date
+                        if !e.highlighter().is_cache_valid() {
+                            e.reparse_syntax();
+                        }
+                        e.update_smooth_scroll()
+                    })
                     .unwrap_or(false);
 
                 if let Some(gpu) = &mut self.gpu {

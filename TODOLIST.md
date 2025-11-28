@@ -67,48 +67,48 @@ Goal: Move from "single file editor" to "real editor".
 
 ---
 
-## PHASE 3 – Text Engine Power (Editor Brain Upgrade)
+## PHASE 3 – Text Engine Power (Editor Brain Upgrade) ✓ DONE
 
 Goal: Professional text manipulation.
 
 ### Core Editing
-- [ ] Multi-cursor support
-- [ ] Block / column selection
-- [ ] Word-based navigation (Ctrl+Left / Ctrl+Right)
-- [ ] Line duplication
-- [ ] Move line up/down
-- [ ] Smart Home / End behavior
+- [x] Multi-cursor support
+- [x] Block / column selection
+- [x] Word-based navigation (Ctrl+Left / Ctrl+Right)
+- [x] Line duplication
+- [x] Move line up/down
+- [x] Smart Home / End behavior
 
 ### Undo / Redo Enhancements
-- [ ] Grouped edits
-- [ ] Undo per buffer
-- [ ] Time-based coalescing
+- [x] Grouped edits
+- [x] Undo per buffer
+- [x] Time-based coalescing
 
 **EXIT CRITERIA:**
-- Advanced editors' muscle memory works
-- Power users feel comfortable
+- Advanced editors' muscle memory works ✓
+- Power users feel comfortable ✓
 
 ---
 
-## PHASE 4 – Syntax Highlighting (GPU-Aware)
+## PHASE 4 – Syntax Highlighting (GPU-Aware) ✓ DONE
 
 Goal: Add syntax awareness without destroying performance.
 
 ### Design Rules (Important)
-- Highlighting MUST NOT block rendering
-- Perform parsing incrementally
-- Do NOT repaint entire buffer every keystroke
+- Highlighting MUST NOT block rendering ✓
+- Perform parsing incrementally ✓
+- Do NOT repaint entire buffer every keystroke ✓
 
 ### Implementation
-- [ ] Tokenization per language (start with one, e.g. Rust or JSON)
-- [ ] Incremental re-tokenization
-- [ ] GPU-side color mapping for tokens
-- [ ] Theme system (colors only, no config UI yet)
+- [x] Tokenization per language (Rust and JSON implemented)
+- [x] Incremental re-tokenization (via tree-sitter)
+- [x] GPU-side color mapping for tokens (per-character coloring)
+- [x] Theme system (dark theme with syntax colors)
 
 **EXIT CRITERIA:**
-- Files highlight correctly
-- No visible lag during typing
-- Rendering remains smooth
+- Files highlight correctly ✓
+- No visible lag during typing ✓
+- Rendering remains smooth ✓
 
 ---
 

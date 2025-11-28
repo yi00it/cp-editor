@@ -1,18 +1,23 @@
 //! Main editor logic.
 
 use crate::buffer::TextBuffer;
-use crate::cursor::{Cursor, Position};
+use crate::cursor::{Cursor, MultiCursor, Position};
 use crate::history::{EditOperation, History};
+use crate::syntax::{Language, SyntaxHighlighter};
 use std::io;
 use std::path::{Path, PathBuf};
 
 /// The main editor state.
-#[derive(Debug)]
+///
+/// Note: Does not derive Debug because SyntaxHighlighter contains Parser
+/// which doesn't implement Debug.
 pub struct Editor {
     /// The text buffer.
     buffer: TextBuffer,
     /// The cursor.
     cursor: Cursor,
+    /// Multi-cursor support (additional cursors beyond the main one).
+    multi_cursors: MultiCursor,
     /// Undo/redo history.
     history: History,
     /// Current file path, if any.
@@ -29,6 +34,8 @@ pub struct Editor {
     smooth_scroll: f32,
     /// Horizontal scroll offset (first visible column).
     horizontal_scroll: usize,
+    /// Syntax highlighter.
+    highlighter: SyntaxHighlighter,
 }
 
 impl Default for Editor {
@@ -43,6 +50,7 @@ impl Editor {
         Self {
             buffer: TextBuffer::new(),
             cursor: Cursor::new(),
+            multi_cursors: MultiCursor::new(),
             history: History::default(),
             file_path: None,
             modified: false,
@@ -51,6 +59,7 @@ impl Editor {
             scroll_offset: 0,
             smooth_scroll: 0.0,
             horizontal_scroll: 0,
+            highlighter: SyntaxHighlighter::new(),
         }
     }
 
@@ -59,12 +68,19 @@ impl Editor {
         let path = path.as_ref();
         self.buffer = TextBuffer::from_file(path)?;
         self.cursor = Cursor::new();
+        self.multi_cursors = MultiCursor::new();
         self.history.clear();
         self.file_path = Some(path.to_path_buf());
         self.modified = false;
         self.scroll_offset = 0;
         self.smooth_scroll = 0.0;
         self.horizontal_scroll = 0;
+
+        // Set up syntax highlighting based on file extension
+        let language = Language::from_path(path);
+        self.highlighter.set_language(language);
+        self.reparse_syntax();
+
         Ok(())
     }
 
@@ -315,8 +331,9 @@ impl Editor {
                 text: ch.to_string(),
             });
         }
-        
+
         self.finish_edit();
+        self.scroll_to_cursor();
     }
 
     /// Deletes the current selection.
@@ -381,9 +398,27 @@ impl Editor {
         self.scroll_to_cursor();
     }
 
+    /// Moves cursor left by one word.
+    pub fn move_word_left(&mut self, extend_selection: bool) {
+        self.cursor.move_word_left(&self.buffer, extend_selection);
+        self.scroll_to_cursor();
+    }
+
+    /// Moves cursor right by one word.
+    pub fn move_word_right(&mut self, extend_selection: bool) {
+        self.cursor.move_word_right(&self.buffer, extend_selection);
+        self.scroll_to_cursor();
+    }
+
     /// Moves cursor to the start of the line.
     pub fn move_to_line_start(&mut self, extend_selection: bool) {
         self.cursor.move_to_line_start(&self.buffer, extend_selection);
+        self.scroll_to_cursor();
+    }
+
+    /// Smart Home: toggles between first non-whitespace and line start.
+    pub fn move_to_line_start_smart(&mut self, extend_selection: bool) {
+        self.cursor.move_to_line_start_smart(&self.buffer, extend_selection);
         self.scroll_to_cursor();
     }
 
@@ -429,6 +464,8 @@ impl Editor {
         self.history.set_selection_after(self.cursor.selection);
         self.history.commit_edit();
         self.modified = true;
+        // Invalidate syntax cache - will be rebuilt on next render
+        self.highlighter.invalidate_cache();
     }
 
     /// Undoes the last edit.
@@ -440,6 +477,7 @@ impl Editor {
             self.cursor.selection = selection;
             self.cursor.clamp_to_buffer(&self.buffer);
             self.scroll_to_cursor();
+            self.highlighter.invalidate_cache();
         }
     }
 
@@ -452,6 +490,7 @@ impl Editor {
             self.cursor.selection = selection;
             self.cursor.clamp_to_buffer(&self.buffer);
             self.scroll_to_cursor();
+            self.highlighter.invalidate_cache();
         }
     }
 
@@ -475,6 +514,164 @@ impl Editor {
     /// Returns true if redo is available.
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
+    }
+
+    // ==================== Line Operations ====================
+
+    /// Duplicates the current line (or selected lines).
+    pub fn duplicate_line(&mut self) {
+        self.begin_edit();
+
+        let (line, _) = self.buffer.char_to_line_col(self.cursor.position());
+
+        // Get the line content with newline
+        let line_text = self.buffer.line_with_newline(line).unwrap_or_default();
+        let line_start = self.buffer.line_start(line);
+        let has_newline = line_text.ends_with('\n');
+
+        // For lines without newline at end (last line), insert newline + content after
+        let (actual_insert_pos, actual_text) = if has_newline {
+            (line_start, line_text)
+        } else {
+            let text = format!("\n{}", line_text);
+            (self.buffer.len_chars(), text)
+        };
+
+        self.buffer.insert(actual_insert_pos, &actual_text);
+        self.history.record(EditOperation::Insert {
+            position: actual_insert_pos,
+            text: actual_text.clone(),
+        });
+
+        // Move cursor to duplicated line
+        let new_line = line + 1;
+        let new_pos = self.buffer.line_start(new_line);
+        self.cursor.set_position(new_pos, false);
+
+        self.finish_edit();
+        self.scroll_to_cursor();
+    }
+
+    /// Moves the current line up.
+    pub fn move_line_up(&mut self) {
+        let (line, col) = self.buffer.char_to_line_col(self.cursor.position());
+
+        if line == 0 {
+            return; // Can't move first line up
+        }
+
+        self.begin_edit();
+
+        let line_start = self.buffer.line_start(line);
+        let line_end = if line + 1 < self.buffer.len_lines() {
+            self.buffer.line_start(line + 1)
+        } else {
+            self.buffer.len_chars()
+        };
+
+        // Get line content
+        let mut line_text = String::new();
+        for i in line_start..line_end {
+            if let Some(ch) = self.buffer.char_at(i) {
+                line_text.push(ch);
+            }
+        }
+
+        // Handle last line (no trailing newline)
+        let is_last_line = line + 1 >= self.buffer.len_lines();
+
+        // Delete the current line
+        self.buffer.remove(line_start, line_end);
+        self.history.record(EditOperation::Delete {
+            position: line_start,
+            text: line_text.clone(),
+        });
+
+        // Insert at the previous line position
+        let prev_line_start = self.buffer.line_start(line - 1);
+
+        // Ensure we have a newline if needed
+        let insert_text = if is_last_line && !line_text.ends_with('\n') {
+            format!("{}\n", line_text)
+        } else {
+            line_text
+        };
+
+        self.buffer.insert(prev_line_start, &insert_text);
+        self.history.record(EditOperation::Insert {
+            position: prev_line_start,
+            text: insert_text.clone(),
+        });
+
+        // Restore cursor position on the moved line
+        let new_line = line - 1;
+        let new_line_len = self.buffer.line_len_chars(new_line);
+        let new_col = col.min(new_line_len);
+        let new_pos = self.buffer.line_col_to_char(new_line, new_col);
+        self.cursor.set_position(new_pos, false);
+
+        self.finish_edit();
+        self.scroll_to_cursor();
+    }
+
+    /// Moves the current line down.
+    pub fn move_line_down(&mut self) {
+        let (line, col) = self.buffer.char_to_line_col(self.cursor.position());
+
+        if line + 1 >= self.buffer.len_lines() {
+            return; // Can't move last line down
+        }
+
+        self.begin_edit();
+
+        let line_start = self.buffer.line_start(line);
+        let line_end = self.buffer.line_start(line + 1);
+
+        // Get line content
+        let mut line_text = String::new();
+        for i in line_start..line_end {
+            if let Some(ch) = self.buffer.char_at(i) {
+                line_text.push(ch);
+            }
+        }
+
+        // Delete the current line
+        self.buffer.remove(line_start, line_end);
+        self.history.record(EditOperation::Delete {
+            position: line_start,
+            text: line_text.clone(),
+        });
+
+        // Insert after what is now the current line (was next line)
+        let new_next_line_end = if line + 1 < self.buffer.len_lines() {
+            self.buffer.line_start(line + 1)
+        } else {
+            self.buffer.len_chars()
+        };
+
+        // Handle inserting at end of file
+        let insert_text = if new_next_line_end == self.buffer.len_chars()
+            && !self.buffer.to_string().ends_with('\n') {
+            format!("\n{}", line_text.trim_end_matches('\n'))
+        } else {
+            line_text
+        };
+
+        self.buffer.insert(new_next_line_end, &insert_text);
+        self.history.record(EditOperation::Insert {
+            position: new_next_line_end,
+            text: insert_text.clone(),
+        });
+
+        // Restore cursor position on the moved line
+        let new_line = line + 1;
+        let new_line_len = self.buffer.line_len_chars(new_line);
+        let new_col = col.min(new_line_len);
+        let new_pos = self.buffer.line_col_to_char(new_line, new_col);
+        self.cursor.set_position(new_pos, false);
+
+        self.finish_edit();
+        self.scroll_to_cursor();
     }
 
     // ==================== Selection ====================
@@ -501,6 +698,267 @@ impl Editor {
             }
             text
         })
+    }
+
+    // ==================== Block Selection ====================
+
+    /// Returns true if currently in block selection mode.
+    pub fn is_block_selection_mode(&self) -> bool {
+        self.cursor.is_block_mode()
+    }
+
+    /// Starts block selection at the current cursor position.
+    pub fn start_block_selection(&mut self) {
+        self.cursor.start_block_selection(&self.buffer);
+    }
+
+    /// Exits block selection mode.
+    pub fn exit_block_selection(&mut self) {
+        self.cursor.exit_block_mode();
+    }
+
+    /// Toggles block selection mode.
+    pub fn toggle_block_selection(&mut self) {
+        if self.cursor.is_block_mode() {
+            self.cursor.exit_block_mode();
+        } else {
+            self.cursor.start_block_selection(&self.buffer);
+        }
+    }
+
+    /// Extends block selection to the given line and column.
+    pub fn extend_block_selection(&mut self, line: usize, col: usize) {
+        if self.cursor.is_block_mode() {
+            self.cursor.update_block_selection(line, col);
+            // Also update the regular cursor position
+            let new_pos = self.buffer.line_col_to_char(line, col);
+            self.cursor.set_position(new_pos, false);
+        }
+    }
+
+    /// Returns the block selection if active.
+    pub fn get_block_selection(&self) -> Option<&crate::cursor::BlockSelection> {
+        self.cursor.get_block_selection()
+    }
+
+    /// Returns the selected text in block mode as a vector of strings (one per line).
+    pub fn block_selected_text(&self) -> Option<Vec<String>> {
+        let block = self.cursor.get_block_selection()?;
+        let (top, bottom) = block.bounds();
+
+        let mut lines = Vec::new();
+        for line_num in top.line..=bottom.line {
+            if let Some((start_col, end_col)) = block.col_range(&self.buffer, line_num) {
+                let line_start = self.buffer.line_start(line_num);
+                let mut text = String::new();
+                for col in start_col..end_col {
+                    if let Some(ch) = self.buffer.char_at(line_start + col) {
+                        text.push(ch);
+                    }
+                }
+                lines.push(text);
+            }
+        }
+        Some(lines)
+    }
+
+    /// Deletes the block selection.
+    pub fn delete_block_selection(&mut self) {
+        let block = match self.cursor.get_block_selection() {
+            Some(b) => *b,
+            None => return,
+        };
+
+        self.begin_edit();
+
+        let (top, bottom) = block.bounds();
+
+        // Delete from bottom to top to preserve line indices
+        for line_num in (top.line..=bottom.line).rev() {
+            if let Some((start_col, end_col)) = block.col_range(&self.buffer, line_num) {
+                if start_col < end_col {
+                    let line_start = self.buffer.line_start(line_num);
+                    let start_pos = line_start + start_col;
+                    let end_pos = line_start + end_col;
+
+                    // Get text for undo
+                    let mut deleted = String::new();
+                    for i in start_pos..end_pos {
+                        if let Some(ch) = self.buffer.char_at(i) {
+                            deleted.push(ch);
+                        }
+                    }
+
+                    self.buffer.remove(start_pos, end_pos);
+                    self.history.record(EditOperation::Delete {
+                        position: start_pos,
+                        text: deleted,
+                    });
+                }
+            }
+        }
+
+        // Move cursor to top-left of selection
+        let new_pos = self.buffer.line_col_to_char(top.line, top.col);
+        self.cursor.set_position(new_pos, false);
+        self.cursor.exit_block_mode();
+
+        self.finish_edit();
+        self.scroll_to_cursor();
+    }
+
+    /// Inserts text at each line of the block selection.
+    pub fn insert_text_at_block(&mut self, text: &str) {
+        let block = match self.cursor.get_block_selection() {
+            Some(b) => *b,
+            None => {
+                // Not in block mode, just insert normally
+                self.insert_text(text);
+                return;
+            }
+        };
+
+        self.begin_edit();
+
+        let (top, bottom) = block.bounds();
+        let insert_col = top.col;
+
+        // Insert from bottom to top to preserve positions
+        for line_num in (top.line..=bottom.line).rev() {
+            let line_len = self.buffer.line_len_chars(line_num);
+            let actual_col = insert_col.min(line_len);
+            let line_start = self.buffer.line_start(line_num);
+            let insert_pos = line_start + actual_col;
+
+            self.buffer.insert(insert_pos, text);
+            self.history.record(EditOperation::Insert {
+                position: insert_pos,
+                text: text.to_string(),
+            });
+        }
+
+        // Exit block mode and move cursor
+        self.cursor.exit_block_mode();
+        let new_pos = self.buffer.line_col_to_char(top.line, insert_col + text.chars().count());
+        self.cursor.set_position(new_pos, false);
+
+        self.finish_edit();
+        self.scroll_to_cursor();
+    }
+
+    // ==================== Multi-Cursor ====================
+
+    /// Returns the number of active cursors.
+    pub fn cursor_count(&self) -> usize {
+        self.multi_cursors.len()
+    }
+
+    /// Returns true if there are multiple cursors active.
+    pub fn has_multiple_cursors(&self) -> bool {
+        self.multi_cursors.len() > 1
+    }
+
+    /// Adds a cursor above the current cursor position.
+    pub fn add_cursor_above(&mut self) {
+        let (line, col) = self.buffer.char_to_line_col(self.cursor.position());
+        if line > 0 {
+            let new_line = line - 1;
+            let new_col = col.min(self.buffer.line_len_chars(new_line));
+            self.multi_cursors.add_cursor_at(&self.buffer, new_line, new_col);
+            self.scroll_to_cursor();
+        }
+    }
+
+    /// Adds a cursor below the current cursor position.
+    pub fn add_cursor_below(&mut self) {
+        let (line, col) = self.buffer.char_to_line_col(self.cursor.position());
+        if line + 1 < self.buffer.len_lines() {
+            let new_line = line + 1;
+            let new_col = col.min(self.buffer.line_len_chars(new_line));
+            self.multi_cursors.add_cursor_at(&self.buffer, new_line, new_col);
+            self.scroll_to_cursor();
+        }
+    }
+
+    /// Adds a cursor at the specified line and column.
+    pub fn add_cursor_at(&mut self, line: usize, col: usize) {
+        self.multi_cursors.add_cursor_at(&self.buffer, line, col);
+    }
+
+    /// Collapses all cursors to the primary cursor.
+    pub fn collapse_cursors(&mut self) {
+        self.multi_cursors.collapse_to_primary();
+    }
+
+    /// Returns all cursor positions for rendering.
+    pub fn all_cursor_positions(&self) -> Vec<(usize, usize)> {
+        self.multi_cursors
+            .positions()
+            .iter()
+            .map(|&pos| self.buffer.char_to_line_col(pos))
+            .collect()
+    }
+
+    /// Returns all selection ranges for rendering.
+    pub fn all_selection_ranges(&self) -> Vec<Option<(usize, usize)>> {
+        self.multi_cursors.selection_ranges()
+    }
+
+    // ==================== Syntax Highlighting ====================
+
+    /// Returns a reference to the syntax highlighter.
+    pub fn highlighter(&self) -> &SyntaxHighlighter {
+        &self.highlighter
+    }
+
+    /// Returns a mutable reference to the syntax highlighter.
+    pub fn highlighter_mut(&mut self) -> &mut SyntaxHighlighter {
+        &mut self.highlighter
+    }
+
+    /// Sets the syntax highlighting language.
+    pub fn set_language(&mut self, language: Language) {
+        self.highlighter.set_language(language);
+        self.reparse_syntax();
+    }
+
+    /// Returns the current language.
+    pub fn language(&self) -> Language {
+        self.highlighter.language()
+    }
+
+    /// Re-parses the entire buffer for syntax highlighting.
+    /// Call this when the buffer content changes significantly.
+    pub fn reparse_syntax(&mut self) {
+        let source = self.buffer.to_string();
+        self.highlighter.parse(&source);
+        self.highlighter.build_line_cache(&source, self.buffer.len_lines());
+    }
+
+    /// Updates the syntax highlighting cache if needed.
+    /// Returns true if the cache was rebuilt.
+    pub fn update_syntax_cache(&mut self) -> bool {
+        if self.highlighter.is_cache_valid() {
+            return false;
+        }
+        let source = self.buffer.to_string();
+        self.highlighter.build_line_cache(&source, self.buffer.len_lines());
+        true
+    }
+
+    /// Invalidates the syntax cache, forcing a rebuild on next render.
+    pub fn invalidate_syntax_cache(&mut self) {
+        self.highlighter.invalidate_cache();
+    }
+
+    /// Gets the highlight color for a specific position.
+    pub fn highlight_color_at(&self, line: usize, col: usize) -> [f32; 4] {
+        self.highlighter.color_at(line, col)
+    }
+
+    /// Returns true if syntax highlighting is available.
+    pub fn has_syntax_highlighting(&self) -> bool {
+        self.highlighter.has_highlighting()
     }
 }
 
@@ -607,8 +1065,50 @@ mod tests {
     fn test_modified_flag() {
         let mut editor = Editor::new();
         assert!(!editor.is_modified());
-        
+
         editor.insert_char('a');
         assert!(editor.is_modified());
+    }
+
+    #[test]
+    fn test_block_selection() {
+        let mut editor = Editor::new();
+        editor.insert_text("line1\nline2\nline3");
+
+        // Start block selection at (0, 0)
+        editor.move_to_buffer_start(false);
+        editor.start_block_selection();
+        assert!(editor.is_block_selection_mode());
+
+        // Extend to (2, 3) - should select "lin" on each line
+        editor.extend_block_selection(2, 3);
+
+        let selected = editor.block_selected_text().unwrap();
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0], "lin");
+        assert_eq!(selected[1], "lin");
+        assert_eq!(selected[2], "lin");
+
+        // Exit block mode
+        editor.exit_block_selection();
+        assert!(!editor.is_block_selection_mode());
+    }
+
+    #[test]
+    fn test_block_selection_delete() {
+        let mut editor = Editor::new();
+        editor.insert_text("abcd\nefgh\nijkl");
+
+        // Select "bc" from each line (columns 1-3)
+        editor.move_to_buffer_start(false);
+        editor.move_right(false); // Move to column 1
+        editor.start_block_selection();
+        editor.extend_block_selection(2, 3);
+
+        // Delete the block
+        editor.delete_block_selection();
+
+        assert_eq!(editor.buffer().to_string(), "ad\neh\nil");
+        assert!(!editor.is_block_selection_mode());
     }
 }

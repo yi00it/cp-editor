@@ -78,7 +78,10 @@ pub enum EditorCommand {
     MoveRight,
     MoveUp,
     MoveDown,
+    MoveWordLeft,
+    MoveWordRight,
     MoveToLineStart,
+    MoveToLineStartSmart,
     MoveToLineEnd,
     MovePageUp,
     MovePageDown,
@@ -90,13 +93,29 @@ pub enum EditorCommand {
     SelectRight,
     SelectUp,
     SelectDown,
+    SelectWordLeft,
+    SelectWordRight,
     SelectToLineStart,
+    SelectToLineStartSmart,
     SelectToLineEnd,
     SelectPageUp,
     SelectPageDown,
     SelectToBufferStart,
     SelectToBufferEnd,
     SelectAll,
+
+    // Line operations
+    DuplicateLine,
+    MoveLineUp,
+    MoveLineDown,
+
+    // Block selection
+    ToggleBlockSelection,
+
+    // Multi-cursor
+    AddCursorAbove,
+    AddCursorBelow,
+    CollapseCursors,
 
     // Undo/Redo
     Undo,
@@ -147,6 +166,10 @@ impl InputHandler {
         self.modifiers.shift_key()
     }
 
+    fn is_alt(&self) -> bool {
+        self.modifiers.alt_key()
+    }
+
     /// Handle character input (for text entry).
     pub fn handle_char_input(&self, ch: char) -> Option<EditorCommand> {
         // Skip control characters and characters that are handled by key events
@@ -168,38 +191,67 @@ impl InputHandler {
 
         let primary = self.is_primary_modifier();
         let shift = self.is_shift();
+        let alt = self.is_alt();
 
         match key {
             Key::Named(NamedKey::Enter) => Some(EditorCommand::InsertNewline),
             Key::Named(NamedKey::Backspace) => Some(EditorCommand::DeleteBackward),
             Key::Named(NamedKey::Delete) => Some(EditorCommand::DeleteForward),
             Key::Named(NamedKey::ArrowLeft) => {
-                if shift {
+                if primary && shift {
+                    Some(EditorCommand::SelectWordLeft)
+                } else if primary {
+                    Some(EditorCommand::MoveWordLeft)
+                } else if shift {
                     Some(EditorCommand::SelectLeft)
                 } else {
                     Some(EditorCommand::MoveLeft)
                 }
             }
             Key::Named(NamedKey::ArrowRight) => {
-                if shift {
+                if primary && shift {
+                    Some(EditorCommand::SelectWordRight)
+                } else if primary {
+                    Some(EditorCommand::MoveWordRight)
+                } else if shift {
                     Some(EditorCommand::SelectRight)
                 } else {
                     Some(EditorCommand::MoveRight)
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if shift {
+                if primary && alt {
+                    // Ctrl+Alt+Up: Add cursor above
+                    Some(EditorCommand::AddCursorAbove)
+                } else if alt && shift {
+                    // Alt+Shift+Up: Extend block selection up
+                    Some(EditorCommand::SelectUp)
+                } else if alt {
+                    Some(EditorCommand::MoveLineUp)
+                } else if shift {
                     Some(EditorCommand::SelectUp)
                 } else {
                     Some(EditorCommand::MoveUp)
                 }
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if shift {
+                if primary && alt {
+                    // Ctrl+Alt+Down: Add cursor below
+                    Some(EditorCommand::AddCursorBelow)
+                } else if alt && shift {
+                    // Alt+Shift+Down: Extend block selection down
+                    Some(EditorCommand::SelectDown)
+                } else if alt {
+                    Some(EditorCommand::MoveLineDown)
+                } else if shift {
                     Some(EditorCommand::SelectDown)
                 } else {
                     Some(EditorCommand::MoveDown)
                 }
+            }
+            Key::Named(NamedKey::Escape) => {
+                // Escape: Collapse multiple cursors to one
+                Some(EditorCommand::CollapseCursors)
             }
             Key::Named(NamedKey::Home) => {
                 if primary {
@@ -209,9 +261,11 @@ impl InputHandler {
                         Some(EditorCommand::MoveToBufferStart)
                     }
                 } else if shift {
-                    Some(EditorCommand::SelectToLineStart)
+                    // Smart home with selection
+                    Some(EditorCommand::SelectToLineStartSmart)
                 } else {
-                    Some(EditorCommand::MoveToLineStart)
+                    // Smart home: toggles between first non-whitespace and line start
+                    Some(EditorCommand::MoveToLineStartSmart)
                 }
             }
             Key::Named(NamedKey::End) => {
@@ -249,7 +303,7 @@ impl InputHandler {
 
             // Character shortcuts
             Key::Character(ch) if primary => match ch.as_str() {
-                "s" if shift => Some(EditorCommand::SaveAs),
+                "s" | "S" if shift => Some(EditorCommand::SaveAs),
                 "s" | "S" => Some(EditorCommand::Save),
                 "o" | "O" => Some(EditorCommand::OpenFile),
                 "n" | "N" => Some(EditorCommand::NewFile),
@@ -259,6 +313,8 @@ impl InputHandler {
                 "Z" => Some(EditorCommand::Redo),
                 "y" | "Y" => Some(EditorCommand::Redo),
                 "a" | "A" => Some(EditorCommand::SelectAll),
+                "d" | "D" => Some(EditorCommand::DuplicateLine),
+                "b" | "B" if shift => Some(EditorCommand::ToggleBlockSelection),
                 // Tab switching with Ctrl+1-9
                 "1" => Some(EditorCommand::SwitchToTab(0)),
                 "2" => Some(EditorCommand::SwitchToTab(1)),

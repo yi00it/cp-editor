@@ -22,7 +22,6 @@ pub struct TabInfo {
 }
 
 /// Manages multiple editor buffers.
-#[derive(Debug)]
 pub struct Workspace {
     /// All open buffers, indexed by BufferId.
     buffers: Vec<Option<Editor>>,

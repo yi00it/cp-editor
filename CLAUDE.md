@@ -61,6 +61,16 @@ editor_desktop  →  editor_ui  →  editor_core
 | Undo | Ctrl+Z | Cmd+Z |
 | Redo | Ctrl+Shift+Z / Ctrl+Y | Cmd+Shift+Z |
 | Select All | Ctrl+A | Cmd+A |
+| Word Left | Ctrl+Left | Cmd+Left |
+| Word Right | Ctrl+Right | Cmd+Right |
+| Smart Home | Home | Home |
+| Duplicate Line | Ctrl+D | Cmd+D |
+| Move Line Up | Alt+Up | Alt+Up |
+| Move Line Down | Alt+Down | Alt+Down |
+| Toggle Block Selection | Ctrl+Shift+B | Cmd+Shift+B |
+| Add Cursor Above | Ctrl+Alt+Up | Cmd+Alt+Up |
+| Add Cursor Below | Ctrl+Alt+Down | Cmd+Alt+Down |
+| Collapse Cursors | Escape | Escape |
 
 ## Tech Stack
 

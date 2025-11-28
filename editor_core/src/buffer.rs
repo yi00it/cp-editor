@@ -174,6 +174,116 @@ impl TextBuffer {
     pub fn to_string(&self) -> String {
         self.rope.to_string()
     }
+
+    // ==================== Word Navigation ====================
+
+    /// Returns true if a character is a word character (alphanumeric or underscore).
+    fn is_word_char(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    /// Finds the start of the word at or before the given position.
+    /// Returns the character index of the word boundary.
+    pub fn find_word_boundary_left(&self, char_idx: usize) -> usize {
+        if char_idx == 0 {
+            return 0;
+        }
+
+        let mut pos = char_idx;
+
+        // Skip any whitespace/non-word chars first
+        while pos > 0 {
+            if let Some(ch) = self.char_at(pos - 1) {
+                if Self::is_word_char(ch) {
+                    break;
+                }
+                pos -= 1;
+            } else {
+                break;
+            }
+        }
+
+        // Then skip word chars to find word start
+        while pos > 0 {
+            if let Some(ch) = self.char_at(pos - 1) {
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                pos -= 1;
+            } else {
+                break;
+            }
+        }
+
+        pos
+    }
+
+    /// Finds the end of the word at or after the given position.
+    /// Returns the character index after the word boundary.
+    pub fn find_word_boundary_right(&self, char_idx: usize) -> usize {
+        let len = self.len_chars();
+        if char_idx >= len {
+            return len;
+        }
+
+        let mut pos = char_idx;
+
+        // Skip word chars first to find word end
+        while pos < len {
+            if let Some(ch) = self.char_at(pos) {
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Then skip any whitespace/non-word chars
+        while pos < len {
+            if let Some(ch) = self.char_at(pos) {
+                if Self::is_word_char(ch) {
+                    break;
+                }
+                pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        pos
+    }
+
+    /// Returns the first non-whitespace column on the given line.
+    /// Returns 0 if the line is all whitespace or empty.
+    pub fn first_non_whitespace_col(&self, line: usize) -> usize {
+        if line >= self.len_lines() {
+            return 0;
+        }
+
+        let line_start = self.line_start(line);
+        let line_len = self.line_len_chars(line);
+
+        for col in 0..line_len {
+            if let Some(ch) = self.char_at(line_start + col) {
+                if !ch.is_whitespace() {
+                    return col;
+                }
+            }
+        }
+
+        0 // All whitespace, return 0
+    }
+
+    /// Returns the full text of a line including the newline character if present.
+    pub fn line_with_newline(&self, line: usize) -> Option<String> {
+        if line >= self.len_lines() {
+            None
+        } else {
+            Some(self.rope.line(line).to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -254,5 +364,44 @@ mod tests {
         assert_eq!(buf.line_col_to_char(0, 2), 2);
         assert_eq!(buf.line_col_to_char(1, 0), 4);
         assert_eq!(buf.line_col_to_char(1, 2), 6);
+    }
+
+    #[test]
+    fn test_word_boundary_left() {
+        let buf = TextBuffer::from_str("hello world test");
+        // From end of "test"
+        assert_eq!(buf.find_word_boundary_left(16), 12);
+        // From middle of "world"
+        assert_eq!(buf.find_word_boundary_left(8), 6);
+        // From start of "world"
+        assert_eq!(buf.find_word_boundary_left(6), 0);
+        // From space after "hello"
+        assert_eq!(buf.find_word_boundary_left(5), 0);
+        // From start
+        assert_eq!(buf.find_word_boundary_left(0), 0);
+    }
+
+    #[test]
+    fn test_word_boundary_right() {
+        let buf = TextBuffer::from_str("hello world test");
+        // From start
+        assert_eq!(buf.find_word_boundary_right(0), 6);
+        // From middle of "hello"
+        assert_eq!(buf.find_word_boundary_right(2), 6);
+        // From space after "hello"
+        assert_eq!(buf.find_word_boundary_right(5), 6);
+        // From start of "world"
+        assert_eq!(buf.find_word_boundary_right(6), 12);
+        // From end
+        assert_eq!(buf.find_word_boundary_right(16), 16);
+    }
+
+    #[test]
+    fn test_first_non_whitespace_col() {
+        let buf = TextBuffer::from_str("hello\n    indented\n\n  spaces");
+        assert_eq!(buf.first_non_whitespace_col(0), 0);
+        assert_eq!(buf.first_non_whitespace_col(1), 4);
+        assert_eq!(buf.first_non_whitespace_col(2), 0);
+        assert_eq!(buf.first_non_whitespace_col(3), 2);
     }
 }
