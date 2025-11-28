@@ -1595,11 +1595,16 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
     renderer: GpuRenderer,
+    /// Current DPI scale factor.
+    scale_factor: f64,
+    /// Base font size (before DPI scaling).
+    base_font_size: f32,
 }
 
 impl GpuState {
     fn new(window: Arc<Window>, font_size: f32) -> Self {
         let size = window.inner_size();
+        let scale_factor = window.scale_factor();
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -1646,13 +1651,17 @@ impl GpuState {
         };
         surface.configure(&device, &config);
 
+        // Scale font size by DPI factor for crisp text on high-DPI displays
+        let scaled_font_size = font_size * scale_factor as f32;
+        log::info!("DPI scale factor: {:.2}, font size: {:.1} -> {:.1}", scale_factor, font_size, scaled_font_size);
+
         let renderer = GpuRenderer::new(
             &device,
             &queue,
             surface_format,
             size.width.max(1),
             size.height.max(1),
-            font_size,
+            scaled_font_size,
         );
 
         Self {
@@ -1662,6 +1671,19 @@ impl GpuState {
             config,
             size,
             renderer,
+            scale_factor,
+            base_font_size: font_size,
+        }
+    }
+
+    /// Handles a scale factor change (DPI change).
+    fn scale_factor_changed(&mut self, new_scale_factor: f64) {
+        if (self.scale_factor - new_scale_factor).abs() > 0.01 {
+            log::info!("DPI scale factor changed: {:.2} -> {:.2}", self.scale_factor, new_scale_factor);
+            self.scale_factor = new_scale_factor;
+            // Note: Font atlas would need to be regenerated for proper scaling
+            // For now, we just log the change. Full DPI change support would require
+            // recreating the font atlas with the new scaled font size.
         }
     }
 
@@ -2646,6 +2668,15 @@ impl ApplicationHandler for AppState {
                     window.request_redraw();
                 }
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Handle DPI change (e.g., moving window between monitors)
+                if let Some(gpu) = &mut self.gpu {
+                    gpu.scale_factor_changed(scale_factor);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers.state();
                 self.app
@@ -2911,6 +2942,41 @@ impl ApplicationHandler for AppState {
                         window.request_redraw();
                     }
                 }
+            }
+            WindowEvent::DroppedFile(path) => {
+                // Handle file drag-and-drop
+                log::info!("File dropped: {:?}", path);
+                if let Err(e) = self.app.workspace.open_file(&path) {
+                    self.app.notifications.error(format!("Failed to open dropped file: {}", e));
+                } else {
+                    self.app.notifications.info(format!("Opened: {}", path.display()));
+                    // Start LSP for the opened file
+                    if let Some(editor) = self.app.workspace.active_editor() {
+                        if let Some(file_path) = editor.file_path() {
+                            if let Some(lang_id) = language_id_from_path(file_path) {
+                                if let Some(parent) = file_path.parent() {
+                                    if let Some(root) = find_project_root(parent) {
+                                        self.app.lsp_manager.set_workspace_root(Some(root));
+                                        self.app.lsp_manager.start_client(&lang_id);
+                                        self.app.lsp_manager.did_open(file_path, &lang_id, &editor.buffer().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.update_window_title();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::HoveredFile(path) => {
+                // Visual feedback when dragging file over window
+                log::debug!("File hovering: {:?}", path);
+            }
+            WindowEvent::HoveredFileCancelled => {
+                // File drag cancelled
+                log::debug!("File hover cancelled");
             }
             _ => {}
         }
