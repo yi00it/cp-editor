@@ -8,6 +8,7 @@ description = "CP Editor - GPU rendering and UI layer"
 
 [dependencies]
 cp-editor-core = { path = "../editor_core" }
+cp-editor-lsp = { path = "../editor_lsp" }
 wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true

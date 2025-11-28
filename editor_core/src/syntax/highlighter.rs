@@ -277,6 +277,9 @@ impl SyntaxHighlighter {
 
         match language {
             Language::Rust => Self::rust_node_style_static(node, kind),
+            Language::Python => Self::python_node_style_static(node, kind),
+            Language::JavaScript | Language::TypeScript => Self::js_ts_node_style_static(node, kind),
+            Language::C | Language::Cpp => Self::c_cpp_node_style_static(node, kind),
             Language::Json => Self::json_node_style_static(node, kind),
             Language::PlainText => None,
         }
@@ -370,6 +373,172 @@ impl SyntaxHighlighter {
             "number" => Some(TokenStyle::Number),
             "true" | "false" => Some(TokenStyle::Boolean),
             "null" => Some(TokenStyle::Constant),
+            _ => None,
+        }
+    }
+
+    /// Determines style for Python nodes.
+    fn python_node_style_static(node: &Node, kind: &str) -> Option<TokenStyle> {
+        match kind {
+            // Keywords
+            "def" | "class" | "import" | "from" | "as" | "global" | "nonlocal"
+            | "lambda" | "with" | "assert" | "yield" | "del" | "pass" | "raise"
+            | "except" | "finally" | "try" | "async" | "await" => Some(TokenStyle::Keyword),
+
+            // Control flow
+            "if" | "elif" | "else" | "for" | "while" | "break" | "continue"
+            | "return" | "in" | "not" | "and" | "or" | "is" => Some(TokenStyle::ControlFlow),
+
+            // Literals
+            "string" | "string_start" | "string_content" | "string_end" => Some(TokenStyle::String),
+            "integer" | "float" => Some(TokenStyle::Number),
+            "true" | "false" => Some(TokenStyle::Boolean),
+            "none" => Some(TokenStyle::Constant),
+
+            // Comments
+            "comment" => Some(TokenStyle::Comment),
+
+            // Decorators
+            "decorator" => Some(TokenStyle::Attribute),
+
+            // Function/class names
+            "identifier" => {
+                if let Some(parent) = node.parent() {
+                    match parent.kind() {
+                        "function_definition" | "class_definition" => {
+                            if parent.child_by_field_name("name") == Some(*node) {
+                                return Some(TokenStyle::Function);
+                            }
+                        }
+                        "call" => {
+                            if parent.child_by_field_name("function") == Some(*node) {
+                                return Some(TokenStyle::Function);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Determines style for JavaScript/TypeScript nodes.
+    fn js_ts_node_style_static(node: &Node, kind: &str) -> Option<TokenStyle> {
+        match kind {
+            // Keywords
+            "function" | "const" | "let" | "var" | "class" | "extends" | "import"
+            | "export" | "default" | "from" | "as" | "new" | "this" | "super"
+            | "static" | "get" | "set" | "async" | "await" | "typeof" | "instanceof"
+            | "void" | "delete" | "in" | "of" => Some(TokenStyle::Keyword),
+
+            // TypeScript specific
+            "type" | "interface" | "enum" | "namespace" | "module" | "declare"
+            | "readonly" | "abstract" | "implements" | "private" | "protected"
+            | "public" => Some(TokenStyle::Keyword),
+
+            // Control flow
+            "if" | "else" | "for" | "while" | "do" | "switch" | "case" | "break"
+            | "continue" | "return" | "throw" | "try" | "catch" | "finally"
+            | "yield" => Some(TokenStyle::ControlFlow),
+
+            // Literals
+            "string" | "template_string" | "string_fragment" => Some(TokenStyle::String),
+            "number" => Some(TokenStyle::Number),
+            "true" | "false" => Some(TokenStyle::Boolean),
+            "null" | "undefined" => Some(TokenStyle::Constant),
+
+            // Comments
+            "comment" | "line_comment" | "block_comment" => Some(TokenStyle::Comment),
+
+            // Types
+            "type_identifier" => Some(TokenStyle::Type),
+
+            // Function names
+            "identifier" | "property_identifier" => {
+                if let Some(parent) = node.parent() {
+                    match parent.kind() {
+                        "function_declaration" | "method_definition" | "arrow_function" => {
+                            if parent.child_by_field_name("name") == Some(*node) {
+                                return Some(TokenStyle::Function);
+                            }
+                        }
+                        "call_expression" => {
+                            if parent.child_by_field_name("function") == Some(*node) {
+                                return Some(TokenStyle::Function);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Determines style for C/C++ nodes.
+    fn c_cpp_node_style_static(node: &Node, kind: &str) -> Option<TokenStyle> {
+        match kind {
+            // Keywords
+            "auto" | "break" | "case" | "const" | "continue" | "default" | "do"
+            | "else" | "enum" | "extern" | "for" | "goto" | "if" | "inline"
+            | "register" | "restrict" | "return" | "signed" | "sizeof" | "static"
+            | "struct" | "switch" | "typedef" | "union" | "unsigned" | "void"
+            | "volatile" | "while" => Some(TokenStyle::Keyword),
+
+            // C++ specific
+            "class" | "namespace" | "template" | "typename" | "virtual" | "override"
+            | "final" | "public" | "private" | "protected" | "friend" | "new"
+            | "delete" | "this" | "throw" | "try" | "catch" | "using" | "constexpr"
+            | "nullptr" | "noexcept" | "decltype" | "explicit" | "mutable"
+            | "operator" => Some(TokenStyle::Keyword),
+
+            // Control flow
+            "if" | "else" | "for" | "while" | "do" | "switch" | "case" | "break"
+            | "continue" | "return" | "goto" => Some(TokenStyle::ControlFlow),
+
+            // Literals
+            "string_literal" | "char_literal" | "raw_string_literal" => Some(TokenStyle::String),
+            "number_literal" => Some(TokenStyle::Number),
+            "true" | "false" => Some(TokenStyle::Boolean),
+            "null" | "nullptr" => Some(TokenStyle::Constant),
+
+            // Comments
+            "comment" => Some(TokenStyle::Comment),
+
+            // Types
+            "type_identifier" | "primitive_type" | "sized_type_specifier" => Some(TokenStyle::Type),
+
+            // Preprocessor
+            "preproc_include" | "preproc_def" | "preproc_ifdef" | "preproc_ifndef"
+            | "preproc_if" | "preproc_else" | "preproc_elif" | "preproc_endif"
+            | "#include" | "#define" | "#ifdef" | "#ifndef" | "#if" | "#else"
+            | "#elif" | "#endif" | "#pragma" => Some(TokenStyle::Attribute),
+
+            // Function names
+            "identifier" => {
+                if let Some(parent) = node.parent() {
+                    match parent.kind() {
+                        "function_definition" | "function_declarator" => {
+                            if parent.child_by_field_name("declarator") == Some(*node) {
+                                return Some(TokenStyle::Function);
+                            }
+                        }
+                        "call_expression" => {
+                            if parent.child_by_field_name("function") == Some(*node) {
+                                return Some(TokenStyle::Function);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+
             _ => None,
         }
     }

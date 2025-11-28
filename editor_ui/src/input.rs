@@ -134,6 +134,10 @@ pub enum EditorCommand {
 
     // Navigation
     GoToLine,
+
+    // LSP commands
+    GotoDefinition,
+    TriggerCompletion,
 }
 
 /// Input handler that maps keyboard/mouse events to editor commands.
@@ -270,6 +274,7 @@ impl InputHandler {
                     Some(EditorCommand::FindNext)
                 }
             }
+            Key::Named(NamedKey::F12) => Some(EditorCommand::GotoDefinition),
             Key::Named(NamedKey::Home) => {
                 if primary {
                     if shift {
@@ -316,6 +321,7 @@ impl InputHandler {
             Key::Named(NamedKey::Tab) if primary && shift => Some(EditorCommand::PrevTab),
             Key::Named(NamedKey::Tab) if primary => Some(EditorCommand::NextTab),
             Key::Named(NamedKey::Tab) => Some(EditorCommand::InsertChar('\t')),
+            Key::Named(NamedKey::Space) if primary => Some(EditorCommand::TriggerCompletion),
             Key::Named(NamedKey::Space) => Some(EditorCommand::InsertChar(' ')),
 
             // Character shortcuts

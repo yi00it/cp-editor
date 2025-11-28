@@ -2,6 +2,9 @@
 
 use crate::gpu_renderer::GpuRenderer;
 use crate::input::{EditorCommand, InputHandler};
+use crate::lsp::{language_id_from_path, LspEvent, LspManager};
+use crate::notifications::NotificationManager;
+use cp_editor_core::lsp_types::{CompletionItem, DiagnosticSeverity};
 use cp_editor_core::Workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +24,9 @@ const TAB_BAR_HEIGHT: f32 = 28.0;
 
 /// Search bar height in pixels.
 const SEARCH_BAR_HEIGHT: f32 = 32.0;
+
+/// Status bar height in pixels.
+const STATUS_BAR_HEIGHT: f32 = 24.0;
 
 /// Input mode for the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +82,22 @@ pub struct EditorApp {
     pub goto_text: String,
     /// Which input field is focused (0 = search, 1 = replace).
     pub focused_field: usize,
+    /// LSP manager for language server integration.
+    pub lsp_manager: LspManager,
+    /// Last mouse position for hover (screen coordinates).
+    pub hover_mouse_pos: Option<(f32, f32)>,
+    /// Last hover request time.
+    pub hover_request_time: Option<Instant>,
+    /// Whether we're waiting for a hover response.
+    pub hover_pending: bool,
+    /// Whether the completion popup is visible.
+    pub completion_visible: bool,
+    /// Selected completion item index.
+    pub completion_selected: usize,
+    /// Position where completion was triggered (line, col).
+    pub completion_trigger_pos: Option<(usize, usize)>,
+    /// Notification manager for user feedback.
+    pub notifications: NotificationManager,
 }
 
 impl EditorApp {
@@ -100,6 +122,307 @@ impl EditorApp {
             replace_text: String::new(),
             goto_text: String::new(),
             focused_field: 0,
+            lsp_manager: LspManager::new(),
+            hover_mouse_pos: None,
+            hover_request_time: None,
+            hover_pending: false,
+            completion_visible: false,
+            completion_selected: 0,
+            completion_trigger_pos: None,
+            notifications: NotificationManager::new(),
+        }
+    }
+
+    /// Polls LSP for events and processes them.
+    pub fn poll_lsp(&mut self) {
+        let events = self.lsp_manager.poll();
+        for event in events {
+            self.handle_lsp_event(event);
+        }
+    }
+
+    /// Handles an LSP event.
+    fn handle_lsp_event(&mut self, event: LspEvent) {
+        match event {
+            LspEvent::Diagnostics { path, diagnostics } => {
+                // Find the editor for this path and set diagnostics
+                if let Some((_id, editor)) = self.workspace.editors_mut().find(|(_, e)| {
+                    e.file_path() == Some(path.as_path())
+                }) {
+                    editor.set_diagnostics(diagnostics);
+                    log::debug!("Updated diagnostics for {:?}", path);
+                }
+            }
+            LspEvent::Hover { path, info } => {
+                // Find the editor for this path and set hover info
+                self.hover_pending = false;
+                if let Some((_, editor)) = self.workspace.editors_mut().find(|(_, e)| {
+                    e.file_path() == Some(path.as_path())
+                }) {
+                    editor.set_hover_info(info);
+                }
+            }
+            LspEvent::Completion { path, items } => {
+                // Find the editor for this path and set completions
+                if let Some((_, editor)) = self.workspace.editors_mut().find(|(_, e)| {
+                    e.file_path() == Some(path.as_path())
+                }) {
+                    let has_items = !items.is_empty();
+                    editor.set_completions(items);
+                    // Show completion popup if we have items
+                    if has_items {
+                        self.completion_visible = true;
+                        self.completion_selected = 0;
+                    } else {
+                        self.completion_visible = false;
+                    }
+                }
+            }
+            LspEvent::GotoDefinition { path: _, locations } => {
+                // Jump to the first location
+                if let Some((def_path, line, col)) = locations.into_iter().next() {
+                    // Open the file and go to the location
+                    if let Ok(id) = self.workspace.open_file(&def_path) {
+                        self.workspace.set_active(id);
+                        if let Some(editor) = self.workspace.active_editor_mut() {
+                            editor.go_to_line_col(line + 1, col + 1);
+                        }
+                    }
+                }
+            }
+            LspEvent::ServerReady { language } => {
+                log::info!("LSP server ready for {}", language);
+            }
+            LspEvent::Error { message } => {
+                log::error!("LSP error: {}", message);
+            }
+        }
+    }
+
+    /// Notifies LSP that the active document changed.
+    pub fn notify_lsp_document_change(&mut self) {
+        if let Some(editor) = self.workspace.active_editor_mut() {
+            if let Some(path) = editor.file_path().map(|p| p.to_path_buf()) {
+                if let Some(lang) = language_id_from_path(&path) {
+                    let text = editor.buffer().to_string();
+                    editor.increment_document_version();
+                    let version = editor.document_version();
+                    self.lsp_manager.did_change(&path, lang, version, &text);
+                }
+            }
+        }
+    }
+
+    /// Notifies LSP that a file was opened.
+    pub fn notify_lsp_file_opened(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                // Set workspace root if not already set (use parent directory of opened file)
+                if self.lsp_manager.workspace_root().is_none() {
+                    if let Some(parent) = path.parent() {
+                        // Try to find a project root (Cargo.toml, package.json, .git, etc.)
+                        let workspace_root = find_project_root(parent).unwrap_or_else(|| parent.to_path_buf());
+                        self.lsp_manager.set_workspace_root(Some(workspace_root));
+                    }
+                }
+
+                if let Some(lang) = language_id_from_path(path) {
+                    let text = editor.buffer().to_string();
+                    let path = path.to_path_buf();
+                    self.lsp_manager.did_open(&path, lang, &text);
+                }
+            }
+        }
+    }
+
+    /// Notifies LSP that a file was saved.
+    pub fn notify_lsp_file_saved(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                if let Some(lang) = language_id_from_path(path) {
+                    let path = path.to_path_buf();
+                    self.lsp_manager.did_save(&path, lang);
+                }
+            }
+        }
+    }
+
+    /// Requests hover info from LSP at the current cursor position.
+    pub fn request_hover(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                if let Some(lang) = language_id_from_path(path) {
+                    let pos = editor.cursor_position();
+                    let path = path.to_path_buf();
+                    self.lsp_manager.hover(&path, lang, pos.line, pos.col);
+                }
+            }
+        }
+    }
+
+    /// Requests completions from LSP at the current cursor position.
+    pub fn request_completions(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                if let Some(lang) = language_id_from_path(path) {
+                    let pos = editor.cursor_position();
+                    let path = path.to_path_buf();
+                    self.lsp_manager.completion(&path, lang, pos.line, pos.col);
+                }
+            }
+        }
+    }
+
+    /// Requests go to definition from LSP at the current cursor position.
+    pub fn request_goto_definition(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                if let Some(lang) = language_id_from_path(path) {
+                    let pos = editor.cursor_position();
+                    let path = path.to_path_buf();
+                    self.lsp_manager.goto_definition(&path, lang, pos.line, pos.col);
+                }
+            }
+        }
+    }
+
+    /// Updates hover state based on mouse position.
+    /// Call this when the mouse moves to potentially trigger a hover request.
+    pub fn update_hover(&mut self, screen_x: f32, screen_y: f32, char_width: f32, line_height: f32) {
+        // Delay before showing hover (500ms)
+        const HOVER_DELAY_MS: u64 = 500;
+
+        let (line, col) = self.screen_to_buffer_position(screen_x, screen_y, char_width, line_height);
+
+        // Check if we moved to a different position
+        let should_clear = self.hover_mouse_pos.map(|(prev_x, prev_y)| {
+            let (prev_line, prev_col) = self.screen_to_buffer_position(prev_x, prev_y, char_width, line_height);
+            prev_line != line || prev_col != col
+        }).unwrap_or(true);
+
+        if should_clear {
+            // Clear existing hover info if we moved
+            if let Some(editor) = self.workspace.active_editor_mut() {
+                editor.clear_hover_info();
+            }
+            self.hover_mouse_pos = Some((screen_x, screen_y));
+            self.hover_request_time = Some(Instant::now());
+            self.hover_pending = false;
+        }
+
+        // Check if we should trigger a hover request
+        if !self.hover_pending {
+            if let Some(request_time) = self.hover_request_time {
+                if request_time.elapsed() >= Duration::from_millis(HOVER_DELAY_MS) {
+                    // Send hover request at this position
+                    if let Some(editor) = self.workspace.active_editor() {
+                        if let Some(path) = editor.file_path() {
+                            if let Some(lang) = language_id_from_path(path) {
+                                let path = path.to_path_buf();
+                                self.lsp_manager.hover(&path, lang, line, col);
+                                self.hover_pending = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clears the hover state.
+    pub fn clear_hover(&mut self) {
+        self.hover_mouse_pos = None;
+        self.hover_request_time = None;
+        self.hover_pending = false;
+        if let Some(editor) = self.workspace.active_editor_mut() {
+            editor.clear_hover_info();
+        }
+    }
+
+    /// Triggers auto-completion at the current cursor position.
+    pub fn trigger_completion(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            if let Some(path) = editor.file_path() {
+                if let Some(lang) = language_id_from_path(path) {
+                    let pos = editor.cursor_position();
+                    let path = path.to_path_buf();
+                    self.completion_trigger_pos = Some((pos.line, pos.col));
+                    self.lsp_manager.completion(&path, lang, pos.line, pos.col);
+                }
+            }
+        }
+    }
+
+    /// Moves to the next completion item.
+    pub fn completion_next(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            let count = editor.completions().len();
+            if count > 0 {
+                self.completion_selected = (self.completion_selected + 1) % count;
+            }
+        }
+    }
+
+    /// Moves to the previous completion item.
+    pub fn completion_prev(&mut self) {
+        if let Some(editor) = self.workspace.active_editor() {
+            let count = editor.completions().len();
+            if count > 0 {
+                if self.completion_selected == 0 {
+                    self.completion_selected = count - 1;
+                } else {
+                    self.completion_selected -= 1;
+                }
+            }
+        }
+    }
+
+    /// Accepts the currently selected completion.
+    pub fn accept_completion(&mut self) {
+        if !self.completion_visible {
+            return;
+        }
+
+        let insert_text = if let Some(editor) = self.workspace.active_editor() {
+            let completions = editor.completions();
+            if self.completion_selected < completions.len() {
+                let item = &completions[self.completion_selected];
+                Some(item.insert_text.clone().unwrap_or_else(|| item.label.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(text) = insert_text {
+            // Delete from trigger position to current position, then insert
+            if let Some((trigger_line, trigger_col)) = self.completion_trigger_pos {
+                if let Some(editor) = self.workspace.active_editor_mut() {
+                    let pos = editor.cursor_position();
+                    // Only insert if we're on the same line
+                    if pos.line == trigger_line && pos.col >= trigger_col {
+                        // Delete the partial text typed so far
+                        for _ in trigger_col..pos.col {
+                            editor.delete_backward();
+                        }
+                        // Insert the completion text
+                        editor.insert_text(&text);
+                    }
+                }
+            }
+        }
+
+        self.hide_completion();
+    }
+
+    /// Hides the completion popup.
+    pub fn hide_completion(&mut self) {
+        self.completion_visible = false;
+        self.completion_selected = 0;
+        self.completion_trigger_pos = None;
+        if let Some(editor) = self.workspace.active_editor_mut() {
+            editor.clear_completions();
         }
     }
 
@@ -346,12 +669,12 @@ impl EditorApp {
             return;
         };
 
-        // Draw line number background (below tab bar and search bar)
+        // Draw line number background (below tab bar and search bar, above status bar)
         renderer.draw_rect(
             0.0,
             content_y,
             self.line_number_margin,
-            viewport_height as f32 - content_y,
+            viewport_height as f32 - content_y - STATUS_BAR_HEIGHT,
             renderer.colors.line_number_bg,
         );
 
@@ -365,9 +688,11 @@ impl EditorApp {
         let scroll_frac = smooth_scroll - smooth_scroll.floor();
         let base_scroll_line = smooth_scroll.floor() as usize;
 
-        // Get cursor position for selection rendering
+        // Get cursor positions for selection rendering (multi-cursor support)
         let cursor_pos = editor.cursor_position();
-        let selection_range = editor.selected_range();
+        let all_cursor_positions = editor.all_cursor_positions();
+        let all_selection_ranges = editor.all_selection_ranges();
+        let block_selection = editor.get_block_selection().copied();
 
         // Get search matches for visible lines
         let search_matches = editor.search_matches_in_range(base_scroll_line, base_scroll_line + visible_lines);
@@ -424,39 +749,66 @@ impl EditorApp {
                 }
             }
 
-            // Draw selection background for this line
-            if let Some((sel_start, sel_end)) = selection_range {
-                let line_start = buffer.line_start(buffer_line);
-                let line_end = buffer.line_end(buffer_line);
+            // Draw selection backgrounds for this line (all cursors)
+            let line_start = buffer.line_start(buffer_line);
+            let line_end = buffer.line_end(buffer_line);
 
-                // Check if selection overlaps this line
-                if sel_start < line_end + 1 && sel_end > line_start {
-                    let sel_start_on_line = if sel_start > line_start {
-                        sel_start - line_start
-                    } else {
-                        0
-                    };
-                    let sel_end_on_line = if sel_end < line_end + 1 {
-                        sel_end - line_start
-                    } else {
-                        line_end - line_start + 1
-                    };
+            for selection_range in &all_selection_ranges {
+                if let Some((sel_start, sel_end)) = selection_range {
+                    // Check if selection overlaps this line
+                    if *sel_start < line_end + 1 && *sel_end > line_start {
+                        let sel_start_on_line = if *sel_start > line_start {
+                            *sel_start - line_start
+                        } else {
+                            0
+                        };
+                        let sel_end_on_line = if *sel_end < line_end + 1 {
+                            *sel_end - line_start
+                        } else {
+                            line_end - line_start + 1
+                        };
 
-                    // Apply horizontal scroll offset to selection
-                    let visible_sel_start = sel_start_on_line.saturating_sub(horizontal_scroll);
-                    let visible_sel_end = sel_end_on_line.saturating_sub(horizontal_scroll);
+                        // Apply horizontal scroll offset to selection
+                        let visible_sel_start = sel_start_on_line.saturating_sub(horizontal_scroll);
+                        let visible_sel_end = sel_end_on_line.saturating_sub(horizontal_scroll);
 
-                    if visible_sel_end > 0 {
-                        let sel_x = self.line_number_margin + visible_sel_start as f32 * char_width;
-                        let sel_width = (visible_sel_end - visible_sel_start) as f32 * char_width;
+                        if visible_sel_end > 0 {
+                            let sel_x = self.line_number_margin + visible_sel_start as f32 * char_width;
+                            let sel_width = (visible_sel_end - visible_sel_start) as f32 * char_width;
 
-                        renderer.draw_rect(
-                            sel_x,
-                            y,
-                            sel_width.max(char_width * 0.5),
-                            line_height,
-                            renderer.colors.selection,
-                        );
+                            renderer.draw_rect(
+                                sel_x,
+                                y,
+                                sel_width.max(char_width * 0.5),
+                                line_height,
+                                renderer.colors.selection,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Draw block selection for this line (if active)
+            if let Some(ref block) = block_selection {
+                let (top, bottom) = block.bounds();
+                if buffer_line >= top.line && buffer_line <= bottom.line {
+                    if let Some((start_col, end_col)) = block.col_range(buffer, buffer_line) {
+                        // Apply horizontal scroll offset
+                        let visible_start = start_col.saturating_sub(horizontal_scroll);
+                        let visible_end = end_col.saturating_sub(horizontal_scroll);
+
+                        if visible_end > visible_start {
+                            let block_x = self.line_number_margin + visible_start as f32 * char_width;
+                            let block_width = (visible_end - visible_start) as f32 * char_width;
+
+                            renderer.draw_rect(
+                                block_x,
+                                y,
+                                block_width.max(char_width * 0.5),
+                                line_height,
+                                renderer.colors.selection,
+                            );
+                        }
                     }
                 }
             }
@@ -481,23 +833,303 @@ impl EditorApp {
                     renderer.draw_text(&visible_text, x, y, renderer.colors.text);
                 }
             }
+
+            // Draw diagnostic underlines for this line
+            for diagnostic in editor.diagnostics_on_line(buffer_line) {
+                // Determine color based on severity
+                let color = match diagnostic.severity {
+                    DiagnosticSeverity::Error => renderer.colors.diagnostic_error,
+                    DiagnosticSeverity::Warning => renderer.colors.diagnostic_warning,
+                    DiagnosticSeverity::Information => renderer.colors.diagnostic_info,
+                    DiagnosticSeverity::Hint => renderer.colors.diagnostic_hint,
+                };
+
+                // Calculate the start and end columns on this line
+                let diag_start_col = if diagnostic.start_line == buffer_line {
+                    diagnostic.start_col
+                } else {
+                    0
+                };
+                let diag_end_col = if diagnostic.end_line == buffer_line {
+                    diagnostic.end_col
+                } else {
+                    buffer.line_len_chars(buffer_line)
+                };
+
+                // Adjust for horizontal scroll
+                let visible_start = diag_start_col.saturating_sub(horizontal_scroll);
+                let visible_end = diag_end_col.saturating_sub(horizontal_scroll);
+
+                if visible_end > visible_start {
+                    let underline_x = self.line_number_margin + visible_start as f32 * char_width;
+                    let underline_width = (visible_end - visible_start) as f32 * char_width;
+
+                    // Use squiggly underline for errors/warnings, simple underline for info/hints
+                    match diagnostic.severity {
+                        DiagnosticSeverity::Error | DiagnosticSeverity::Warning => {
+                            renderer.draw_squiggle(underline_x, y, underline_width, line_height, color);
+                        }
+                        _ => {
+                            renderer.draw_underline(underline_x, y, underline_width, line_height, color);
+                        }
+                    }
+                }
+            }
         }
 
-        // Draw cursor
-        if self.cursor_visible
-            && cursor_pos.line >= base_scroll_line
-            && cursor_pos.line <= base_scroll_line + visible_lines
-            && cursor_pos.col >= horizontal_scroll
-        {
-            let cursor_screen_line = cursor_pos.line as f32 - smooth_scroll;
-            let cursor_screen_col = cursor_pos.col - horizontal_scroll;
-            let cursor_x = self.line_number_margin + cursor_screen_col as f32 * char_width;
-            let cursor_y = content_y + cursor_screen_line * line_height;
+        // Draw all cursors (multi-cursor support)
+        if self.cursor_visible {
+            for (cursor_line, cursor_col) in &all_cursor_positions {
+                if *cursor_line >= base_scroll_line
+                    && *cursor_line <= base_scroll_line + visible_lines
+                    && *cursor_col >= horizontal_scroll
+                {
+                    let cursor_screen_line = *cursor_line as f32 - smooth_scroll;
+                    let cursor_screen_col = *cursor_col - horizontal_scroll;
+                    let cursor_x = self.line_number_margin + cursor_screen_col as f32 * char_width;
+                    let cursor_y = content_y + cursor_screen_line * line_height;
 
-            // Only draw if cursor is within visible area
-            if cursor_y >= content_y && cursor_y < viewport_height as f32 {
-                renderer.draw_rect(cursor_x, cursor_y, 2.0, line_height, renderer.colors.cursor);
+                    // Only draw if cursor is within visible area
+                    if cursor_y >= content_y && cursor_y < viewport_height as f32 {
+                        renderer.draw_rect(cursor_x, cursor_y, 2.0, line_height, renderer.colors.cursor);
+                    }
+                }
             }
+        }
+
+        // Draw hover popup if we have hover info
+        if let Some(hover_info) = editor.hover_info() {
+            if let Some((mouse_x, mouse_y)) = self.hover_mouse_pos {
+                self.render_hover_popup(renderer, &hover_info.contents, mouse_x, mouse_y, viewport_width as f32, viewport_height as f32, char_width, line_height);
+            }
+        }
+
+        // Draw completion popup if visible
+        if self.completion_visible {
+            let completions = editor.completions();
+            if !completions.is_empty() {
+                // Calculate popup position near the cursor
+                let popup_x = self.line_number_margin + (cursor_pos.col - horizontal_scroll) as f32 * char_width;
+                let popup_y = content_y + ((cursor_pos.line as f32 - smooth_scroll) + 1.0) * line_height;
+
+                self.render_completion_popup(
+                    renderer,
+                    completions,
+                    self.completion_selected,
+                    popup_x,
+                    popup_y,
+                    viewport_width as f32,
+                    viewport_height as f32,
+                    char_width,
+                    line_height,
+                );
+            }
+        }
+
+        // Draw status bar at the bottom
+        self.render_status_bar(renderer, viewport_width as f32, viewport_height as f32, char_width, line_height);
+
+        // Draw notifications in top-right corner
+        self.render_notifications(renderer, viewport_width as f32, char_width, line_height);
+    }
+
+    /// Renders the hover information popup.
+    fn render_hover_popup(
+        &self,
+        renderer: &mut GpuRenderer,
+        content: &str,
+        mouse_x: f32,
+        mouse_y: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+        char_width: f32,
+        line_height: f32,
+    ) {
+        const PADDING: f32 = 8.0;
+        const MAX_WIDTH: f32 = 500.0;
+        const MAX_HEIGHT: f32 = 300.0;
+
+        // Calculate popup dimensions based on content
+        let lines: Vec<&str> = content.lines().collect();
+        let max_line_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        let content_width = (max_line_len as f32 * char_width).min(MAX_WIDTH - 2.0 * PADDING);
+        let content_height = (lines.len() as f32 * line_height).min(MAX_HEIGHT - 2.0 * PADDING);
+
+        let popup_width = content_width + 2.0 * PADDING;
+        let popup_height = content_height + 2.0 * PADDING;
+
+        // Position popup near the mouse, but keep it on screen
+        let mut popup_x = mouse_x + 16.0;
+        let mut popup_y = mouse_y + 16.0;
+
+        // Adjust if popup would go off the right edge
+        if popup_x + popup_width > viewport_width {
+            popup_x = mouse_x - popup_width - 8.0;
+        }
+
+        // Adjust if popup would go off the bottom edge
+        if popup_y + popup_height > viewport_height {
+            popup_y = mouse_y - popup_height - 8.0;
+        }
+
+        // Ensure popup stays on screen
+        popup_x = popup_x.max(4.0);
+        popup_y = popup_y.max(self.content_y_offset() + 4.0);
+
+        // Draw popup background
+        renderer.draw_rect(popup_x, popup_y, popup_width, popup_height, renderer.colors.hover_bg);
+
+        // Draw border
+        let border_width = 1.0;
+        // Top border
+        renderer.draw_rect(popup_x, popup_y, popup_width, border_width, renderer.colors.hover_border);
+        // Bottom border
+        renderer.draw_rect(popup_x, popup_y + popup_height - border_width, popup_width, border_width, renderer.colors.hover_border);
+        // Left border
+        renderer.draw_rect(popup_x, popup_y, border_width, popup_height, renderer.colors.hover_border);
+        // Right border
+        renderer.draw_rect(popup_x + popup_width - border_width, popup_y, border_width, popup_height, renderer.colors.hover_border);
+
+        // Draw text content (limited to visible lines)
+        let max_visible_lines = ((MAX_HEIGHT - 2.0 * PADDING) / line_height) as usize;
+        let text_x = popup_x + PADDING;
+        let mut text_y = popup_y + PADDING;
+
+        for line in lines.iter().take(max_visible_lines) {
+            // Truncate long lines
+            let max_chars = ((MAX_WIDTH - 2.0 * PADDING) / char_width) as usize;
+            let display_line: String = line.chars().take(max_chars).collect();
+            renderer.draw_text(&display_line, text_x, text_y, renderer.colors.text);
+            text_y += line_height;
+        }
+
+        // Show "..." if content is truncated
+        if lines.len() > max_visible_lines {
+            renderer.draw_text("...", text_x, text_y, renderer.colors.line_number);
+        }
+    }
+
+    /// Renders the completion popup.
+    fn render_completion_popup(
+        &self,
+        renderer: &mut GpuRenderer,
+        items: &[CompletionItem],
+        selected: usize,
+        x: f32,
+        y: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+        char_width: f32,
+        line_height: f32,
+    ) {
+        const PADDING: f32 = 4.0;
+        const MAX_VISIBLE_ITEMS: usize = 10;
+        const ITEM_HEIGHT: f32 = 20.0;
+
+        if items.is_empty() {
+            return;
+        }
+
+        // Calculate popup dimensions
+        let visible_items = items.len().min(MAX_VISIBLE_ITEMS);
+        let max_label_len = items.iter().map(|i| i.label.len()).max().unwrap_or(10).max(20);
+        let popup_width = (max_label_len as f32 * char_width) + 2.0 * PADDING + 24.0; // Extra space for icon
+        let popup_height = visible_items as f32 * ITEM_HEIGHT + 2.0 * PADDING;
+
+        // Position popup - try below cursor first
+        let mut popup_x = x;
+        let mut popup_y = y;
+
+        // Adjust if popup would go off the right edge
+        if popup_x + popup_width > viewport_width {
+            popup_x = viewport_width - popup_width - 4.0;
+        }
+
+        // Adjust if popup would go off the bottom edge - show above cursor
+        if popup_y + popup_height > viewport_height {
+            popup_y = y - popup_height - line_height;
+        }
+
+        // Ensure popup stays on screen
+        popup_x = popup_x.max(4.0);
+        popup_y = popup_y.max(self.content_y_offset() + 4.0);
+
+        // Draw popup background
+        renderer.draw_rect(popup_x, popup_y, popup_width, popup_height, renderer.colors.completion_bg);
+
+        // Draw border
+        let border_width = 1.0;
+        renderer.draw_rect(popup_x, popup_y, popup_width, border_width, renderer.colors.completion_border);
+        renderer.draw_rect(popup_x, popup_y + popup_height - border_width, popup_width, border_width, renderer.colors.completion_border);
+        renderer.draw_rect(popup_x, popup_y, border_width, popup_height, renderer.colors.completion_border);
+        renderer.draw_rect(popup_x + popup_width - border_width, popup_y, border_width, popup_height, renderer.colors.completion_border);
+
+        // Calculate scroll offset to keep selected item visible
+        let scroll_offset = if selected >= MAX_VISIBLE_ITEMS {
+            selected - MAX_VISIBLE_ITEMS + 1
+        } else {
+            0
+        };
+
+        // Draw items
+        let text_x = popup_x + PADDING + 20.0; // Leave space for icon
+        let mut item_y = popup_y + PADDING;
+
+        for (i, item) in items.iter().skip(scroll_offset).take(visible_items).enumerate() {
+            let actual_index = scroll_offset + i;
+            let is_selected = actual_index == selected;
+
+            // Draw selection highlight
+            if is_selected {
+                renderer.draw_rect(
+                    popup_x + border_width,
+                    item_y,
+                    popup_width - 2.0 * border_width,
+                    ITEM_HEIGHT,
+                    renderer.colors.completion_selected_bg,
+                );
+            }
+
+            // Draw kind icon (simplified - just first letter of kind)
+            let kind_char = item.kind.map(|k| {
+                use cp_editor_core::lsp_types::CompletionKind;
+                match k {
+                    CompletionKind::Method | CompletionKind::Function => 'f',
+                    CompletionKind::Variable => 'v',
+                    CompletionKind::Field | CompletionKind::Property => 'p',
+                    CompletionKind::Class | CompletionKind::Struct => 'S',
+                    CompletionKind::Interface => 'I',
+                    CompletionKind::Module => 'M',
+                    CompletionKind::Keyword => 'k',
+                    CompletionKind::Snippet => 's',
+                    CompletionKind::Constant => 'c',
+                    CompletionKind::Enum | CompletionKind::EnumMember => 'E',
+                    CompletionKind::TypeParameter => 'T',
+                    _ => '?',
+                }
+            }).unwrap_or('?');
+
+            let kind_color = renderer.colors.line_number;
+            renderer.draw_char(kind_char, popup_x + PADDING + 4.0, item_y + 2.0, kind_color);
+
+            // Draw label
+            let label_color = if is_selected {
+                renderer.colors.text
+            } else {
+                [0.8, 0.8, 0.8, 1.0]
+            };
+            let max_label_chars = ((popup_width - 2.0 * PADDING - 24.0) / char_width) as usize;
+            let display_label: String = item.label.chars().take(max_label_chars).collect();
+            renderer.draw_text(&display_label, text_x, item_y + 2.0, label_color);
+
+            item_y += ITEM_HEIGHT;
+        }
+
+        // Draw scroll indicator if needed
+        if items.len() > MAX_VISIBLE_ITEMS {
+            let indicator = format!("{}/{}", selected + 1, items.len());
+            let indicator_x = popup_x + popup_width - (indicator.len() as f32 * char_width) - PADDING;
+            renderer.draw_text(&indicator, indicator_x, popup_y + popup_height - line_height - PADDING, renderer.colors.line_number);
         }
     }
 
@@ -621,6 +1253,98 @@ impl EditorApp {
         if focused && self.cursor_visible {
             let cursor_x = text_x + display_text.len() as f32 * char_width;
             renderer.draw_rect(cursor_x, text_y, 2.0, line_height, renderer.colors.cursor);
+        }
+    }
+
+    /// Renders the status bar at the bottom of the window.
+    fn render_status_bar(
+        &self,
+        renderer: &mut GpuRenderer,
+        viewport_width: f32,
+        viewport_height: f32,
+        char_width: f32,
+        line_height: f32,
+    ) {
+        let bar_y = viewport_height - STATUS_BAR_HEIGHT;
+        let padding = 8.0;
+        let text_y = bar_y + (STATUS_BAR_HEIGHT - line_height) / 2.0;
+
+        // Draw status bar background
+        renderer.draw_rect(0.0, bar_y, viewport_width, STATUS_BAR_HEIGHT, renderer.colors.tab_bar_bg);
+
+        // Draw separator line above status bar
+        renderer.draw_rect(0.0, bar_y, viewport_width, 1.0, renderer.colors.line_number);
+
+        // Get editor info
+        if let Some(editor) = self.workspace.active_editor() {
+            // Left side: File info and language
+            let mut left_x = padding;
+
+            // Language indicator
+            let lang_name = editor.language().name();
+            renderer.draw_text(lang_name, left_x, text_y, renderer.colors.line_number);
+            left_x += (lang_name.len() as f32 + 2.0) * char_width;
+
+            // Encoding (always UTF-8 for now)
+            renderer.draw_text("UTF-8", left_x, text_y, renderer.colors.line_number);
+
+            // Right side: Cursor position
+            let cursor = editor.cursor_position();
+            let pos_text = format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1);
+            let pos_x = viewport_width - padding - pos_text.len() as f32 * char_width;
+            renderer.draw_text(&pos_text, pos_x, text_y, renderer.colors.text);
+
+            // Modified indicator (if modified)
+            if editor.is_modified() {
+                let mod_text = "Modified";
+                let mod_x = pos_x - (mod_text.len() as f32 + 3.0) * char_width;
+                renderer.draw_text(mod_text, mod_x, text_y, [0.9, 0.7, 0.3, 1.0]);
+            }
+        }
+    }
+
+    /// Renders notifications in the top-right corner.
+    fn render_notifications(&self, renderer: &mut GpuRenderer, viewport_width: f32, char_width: f32, line_height: f32) {
+        const NOTIFICATION_WIDTH: f32 = 300.0;
+        const NOTIFICATION_HEIGHT: f32 = 40.0;
+        const NOTIFICATION_MARGIN: f32 = 8.0;
+        const NOTIFICATION_PADDING: f32 = 12.0;
+
+        let start_y = TAB_BAR_HEIGHT + NOTIFICATION_MARGIN;
+        let mut y = start_y;
+
+        for notification in self.notifications.visible() {
+            let visibility = notification.visibility();
+            if visibility <= 0.0 {
+                continue;
+            }
+
+            let x = viewport_width - NOTIFICATION_WIDTH - NOTIFICATION_MARGIN;
+
+            // Get colors with alpha based on visibility
+            let mut bg_color = notification.notification_type.color();
+            bg_color[3] *= visibility;
+            let mut text_color = notification.notification_type.text_color();
+            text_color[3] *= visibility;
+
+            // Draw background
+            renderer.draw_rect(x, y, NOTIFICATION_WIDTH, NOTIFICATION_HEIGHT, bg_color);
+
+            // Draw border
+            let border_color = [0.0, 0.0, 0.0, 0.3 * visibility];
+            renderer.draw_rect(x, y, NOTIFICATION_WIDTH, 1.0, border_color);
+            renderer.draw_rect(x, y + NOTIFICATION_HEIGHT - 1.0, NOTIFICATION_WIDTH, 1.0, border_color);
+            renderer.draw_rect(x, y, 1.0, NOTIFICATION_HEIGHT, border_color);
+            renderer.draw_rect(x + NOTIFICATION_WIDTH - 1.0, y, 1.0, NOTIFICATION_HEIGHT, border_color);
+
+            // Draw text (truncate if too long)
+            let text_x = x + NOTIFICATION_PADDING;
+            let text_y = y + (NOTIFICATION_HEIGHT - line_height) / 2.0;
+            let max_chars = ((NOTIFICATION_WIDTH - 2.0 * NOTIFICATION_PADDING) / char_width) as usize;
+            let display_text: String = notification.message.chars().take(max_chars).collect();
+            renderer.draw_text(&display_text, text_x, text_y, text_color);
+
+            y += NOTIFICATION_HEIGHT + NOTIFICATION_MARGIN;
         }
     }
 
@@ -878,13 +1602,22 @@ impl AppState {
                                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                                     let count = editor.replace_all(&self.app.replace_text);
                                     log::info!("Replaced {} occurrences", count);
+                                    if count > 0 {
+                                        self.app.notifications.success(format!("Replaced {} occurrence{}", count, if count == 1 { "" } else { "s" }));
+                                    } else {
+                                        self.app.notifications.info("No matches to replace");
+                                    }
                                 }
+                                self.app.notify_lsp_document_change();
                                 self.update_window_title();
                             } else {
                                 // Replace current
                                 if let Some(editor) = self.app.workspace.active_editor_mut() {
-                                    editor.replace_current(&self.app.replace_text);
+                                    if editor.replace_current(&self.app.replace_text) {
+                                        self.app.notifications.info("Replaced match");
+                                    }
                                 }
+                                self.app.notify_lsp_document_change();
                                 self.update_window_title();
                             }
                         }
@@ -949,7 +1682,18 @@ impl AppState {
                         self.show_save_as_dialog();
                     } else {
                         log::error!("Failed to save: {}", e);
+                        self.app.notifications.error(format!("Failed to save: {}", e));
                     }
+                } else {
+                    // Notify LSP about the saved file
+                    self.app.notify_lsp_file_saved();
+                    // Get file name for notification
+                    let filename = self.app.workspace.active_editor()
+                        .and_then(|e| e.file_path())
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("File");
+                    self.app.notifications.success(format!("Saved: {}", filename));
                 }
                 self.update_window_title();
                 false
@@ -973,8 +1717,16 @@ impl AppState {
             }
             EditorCommand::Quit => {
                 if self.app.workspace.has_unsaved_changes() {
-                    // TODO: Show confirmation dialog
-                    log::warn!("Unsaved changes, quitting anyway for now");
+                    // Show confirmation dialog
+                    let result = rfd::MessageDialog::new()
+                        .set_title("Unsaved Changes")
+                        .set_description("You have unsaved changes. Are you sure you want to quit?")
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .show();
+
+                    if result != rfd::MessageDialogResult::Yes {
+                        return false; // User cancelled, don't quit
+                    }
                 }
                 true
             }
@@ -997,6 +1749,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.insert_char(ch);
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1004,6 +1757,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.insert_newline();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1011,6 +1765,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.delete_backward();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1018,6 +1773,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.delete_forward();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1187,6 +1943,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.duplicate_line();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1194,6 +1951,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.move_line_up();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1201,6 +1959,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.move_line_down();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1234,6 +1993,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.undo();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1241,6 +2001,7 @@ impl AppState {
                 if let Some(editor) = self.app.workspace.active_editor_mut() {
                     editor.redo();
                 }
+                self.app.notify_lsp_document_change();
                 self.update_window_title();
                 false
             }
@@ -1286,6 +2047,14 @@ impl AppState {
                 self.app.open_goto_line();
                 false
             }
+            EditorCommand::GotoDefinition => {
+                self.app.request_goto_definition();
+                false
+            }
+            EditorCommand::TriggerCompletion => {
+                self.app.trigger_completion();
+                false
+            }
         }
     }
 
@@ -1305,6 +2074,9 @@ impl AppState {
             Some(path) => {
                 if let Err(e) = self.app.workspace.open_file(&path) {
                     log::error!("Failed to open file: {}", e);
+                } else {
+                    // Notify LSP about the newly opened file
+                    self.app.notify_lsp_file_opened();
                 }
                 self.update_window_title();
                 if let Some(window) = &self.window {
@@ -1331,8 +2103,18 @@ impl AppState {
 
         match dialog {
             Some(path) => {
+                let filename = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("File")
+                    .to_string();
                 if let Err(e) = self.app.workspace.save_active_as(&path) {
                     log::error!("Failed to save file: {}", e);
+                    self.app.notifications.error(format!("Failed to save: {}", e));
+                } else {
+                    // Notify LSP about the saved file (and open it if new)
+                    self.app.notify_lsp_file_opened();
+                    self.app.notify_lsp_file_saved();
+                    self.app.notifications.success(format!("Saved: {}", filename));
                 }
                 self.update_window_title();
                 if let Some(window) = &self.window {
@@ -1348,8 +2130,45 @@ impl AppState {
     fn close_active_tab(&mut self) {
         if let Some(editor) = self.app.workspace.active_editor() {
             if editor.is_modified() {
-                // TODO: Show confirmation dialog
-                log::warn!("Closing modified buffer without saving");
+                let file_name = editor
+                    .file_path()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Untitled");
+
+                // Show confirmation dialog with Save/Don't Save/Cancel options
+                let result = rfd::MessageDialog::new()
+                    .set_title("Unsaved Changes")
+                    .set_description(&format!(
+                        "Do you want to save the changes to \"{}\"?",
+                        file_name
+                    ))
+                    .set_buttons(rfd::MessageButtons::YesNoCancel)
+                    .show();
+
+                match result {
+                    rfd::MessageDialogResult::Yes => {
+                        // Save before closing
+                        if let Err(e) = self.app.workspace.save_active() {
+                            if e.kind() == std::io::ErrorKind::Other {
+                                // No file path - trigger Save As
+                                self.show_save_as_dialog();
+                                return; // Don't close yet - SaveAs will handle it
+                            } else {
+                                log::error!("Failed to save: {}", e);
+                                return; // Save failed, don't close
+                            }
+                        }
+                        self.app.notify_lsp_file_saved();
+                    }
+                    rfd::MessageDialogResult::No => {
+                        // Don't save, proceed with closing
+                    }
+                    _ => {
+                        // Cancel - don't close
+                        return;
+                    }
+                }
             }
         }
 
@@ -1373,8 +2192,11 @@ impl AppState {
         if let Some(gpu) = &self.gpu {
             if let Some(window) = &self.window {
                 let size = window.inner_size();
-                // Account for tab bar height
-                let content_height = size.height as f32 - TAB_BAR_HEIGHT;
+                // Account for tab bar, search bar (if active), and status bar
+                let mut content_height = size.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+                if self.app.input_mode != InputMode::Normal {
+                    content_height -= SEARCH_BAR_HEIGHT;
+                }
                 let visible_lines = (content_height / gpu.line_height()) as usize;
                 let visible_cols =
                     ((size.width as f32 - self.app.line_number_margin) / gpu.char_width()) as usize;
@@ -1420,8 +2242,16 @@ impl ApplicationHandler for AppState {
         match event {
             WindowEvent::CloseRequested => {
                 if self.app.workspace.has_unsaved_changes() {
-                    // TODO: Show confirmation dialog
-                    log::warn!("Closing with unsaved changes");
+                    // Show confirmation dialog
+                    let result = rfd::MessageDialog::new()
+                        .set_title("Unsaved Changes")
+                        .set_description("You have unsaved changes. Are you sure you want to quit?")
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .show();
+
+                    if result != rfd::MessageDialogResult::Yes {
+                        return; // User cancelled, don't quit
+                    }
                 }
                 event_loop.exit();
             }
@@ -1453,6 +2283,49 @@ impl ApplicationHandler for AppState {
                 ..
             } => {
                 if state == ElementState::Pressed {
+                    // Handle completion navigation first
+                    if self.app.completion_visible {
+                        match &logical_key {
+                            Key::Named(NamedKey::ArrowDown) => {
+                                self.app.completion_next();
+                                self.app.reset_cursor_blink();
+                                if let Some(window) = &self.window {
+                                    window.request_redraw();
+                                }
+                                return;
+                            }
+                            Key::Named(NamedKey::ArrowUp) => {
+                                self.app.completion_prev();
+                                self.app.reset_cursor_blink();
+                                if let Some(window) = &self.window {
+                                    window.request_redraw();
+                                }
+                                return;
+                            }
+                            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
+                                self.app.accept_completion();
+                                self.app.notify_lsp_document_change();
+                                self.update_window_title();
+                                self.app.reset_cursor_blink();
+                                if let Some(window) = &self.window {
+                                    window.request_redraw();
+                                }
+                                return;
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                self.app.hide_completion();
+                                if let Some(window) = &self.window {
+                                    window.request_redraw();
+                                }
+                                return;
+                            }
+                            _ => {
+                                // Any other key hides completion
+                                self.app.hide_completion();
+                            }
+                        }
+                    }
+
                     // Handle input mode (search/replace/goto) first
                     if self.app.is_input_mode() {
                         let handled = self.handle_input_mode_key(&logical_key, event_loop);
@@ -1557,6 +2430,7 @@ impl ApplicationHandler for AppState {
                         if let Some(editor) = self.app.workspace.active_editor_mut() {
                             editor.insert_text(&text);
                         }
+                        self.app.notify_lsp_document_change();
                         self.app.reset_cursor_blink();
                         self.update_window_title();
                         if let Some(window) = &self.window {
@@ -1576,6 +2450,18 @@ impl ApplicationHandler for AppState {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                } else if let Some(gpu) = &self.gpu {
+                    // Update hover state when not dragging
+                    self.app.update_hover(
+                        position.x as f32,
+                        position.y as f32,
+                        gpu.char_width(),
+                        gpu.line_height(),
+                    );
+                    // Request redraw to check for hover timeout
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1583,6 +2469,8 @@ impl ApplicationHandler for AppState {
                     match state {
                         ElementState::Pressed => {
                             self.mouse_dragging = true;
+                            // Clear hover on click
+                            self.app.clear_hover();
                             let extend = self.modifiers.shift_key();
                             self.handle_mouse_click(extend);
                             if let Some(window) = &self.window {
@@ -1596,8 +2484,14 @@ impl ApplicationHandler for AppState {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Poll LSP for events (non-blocking)
+                self.app.poll_lsp();
+
                 // Update cursor blink
                 let blink_needs_redraw = self.app.update_cursor_blink();
+
+                // Update notifications (expire old ones)
+                let notifications_need_redraw = self.app.notifications.update();
 
                 // Update smooth scroll animation and syntax highlighting cache
                 let scroll_needs_redraw = self
@@ -1619,7 +2513,7 @@ impl ApplicationHandler for AppState {
 
                 // Request next frame for continuous animations
                 if let Some(window) = &self.window {
-                    if blink_needs_redraw || scroll_needs_redraw || self.app.cursor_blink_enabled {
+                    if blink_needs_redraw || scroll_needs_redraw || notifications_need_redraw || self.app.cursor_blink_enabled {
                         window.request_redraw();
                     }
                 }
@@ -1634,4 +2528,32 @@ pub fn run(app: EditorApp) {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut state = AppState::new(app);
     event_loop.run_app(&mut state).expect("Event loop error");
+}
+
+/// Finds the project root directory by looking for common project markers.
+/// Walks up the directory tree looking for files like Cargo.toml, package.json, .git, etc.
+fn find_project_root(start_dir: &std::path::Path) -> Option<PathBuf> {
+    let markers = [
+        "Cargo.toml",       // Rust
+        "package.json",     // Node.js
+        "pyproject.toml",   // Python
+        "setup.py",         // Python
+        "go.mod",           // Go
+        "CMakeLists.txt",   // C/C++
+        "Makefile",         // General
+        ".git",             // Git repo root
+    ];
+
+    let mut current = start_dir;
+    loop {
+        for marker in &markers {
+            if current.join(marker).exists() {
+                return Some(current.to_path_buf());
+            }
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return None,
+        }
+    }
 }

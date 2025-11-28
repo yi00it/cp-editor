@@ -346,6 +346,32 @@ impl Workspace {
     pub fn clear_recent_files(&mut self) {
         self.recent_files.clear();
     }
+
+    /// Sets the active buffer by ID. Alias for set_active_buffer.
+    pub fn set_active(&mut self, id: BufferId) -> bool {
+        self.set_active_buffer(id)
+    }
+
+    /// Returns an iterator over all editors with their buffer IDs.
+    pub fn editors_mut(&mut self) -> impl Iterator<Item = (BufferId, &mut Editor)> {
+        self.buffers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(id, opt)| opt.as_mut().map(|e| (id, e)))
+    }
+
+    /// Finds a buffer by file path and returns its ID.
+    pub fn find_by_path(&self, path: &Path) -> Option<BufferId> {
+        self.find_buffer_by_path(path)
+    }
+
+    /// Returns an iterator over all editors (immutable).
+    pub fn editors(&self) -> impl Iterator<Item = (BufferId, &Editor)> {
+        self.buffers
+            .iter()
+            .enumerate()
+            .filter_map(|(id, opt)| opt.as_ref().map(|e| (id, e)))
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 use crate::buffer::TextBuffer;
 use crate::cursor::{Cursor, MultiCursor, Position};
 use crate::history::{EditOperation, History};
+use crate::lsp_types::{CompletionItem, Diagnostic, HoverInfo};
 use crate::search::{Search, SearchMatch};
 use crate::syntax::{Language, SyntaxHighlighter};
 use std::io;
@@ -39,6 +40,14 @@ pub struct Editor {
     highlighter: SyntaxHighlighter,
     /// Search state.
     search: Search,
+    /// LSP diagnostics for this buffer.
+    diagnostics: Vec<Diagnostic>,
+    /// Current hover information (if any).
+    hover_info: Option<HoverInfo>,
+    /// Current completion items (if any).
+    completions: Vec<CompletionItem>,
+    /// Document version for LSP (increments on each change).
+    document_version: i32,
 }
 
 impl Default for Editor {
@@ -64,6 +73,10 @@ impl Editor {
             horizontal_scroll: 0,
             highlighter: SyntaxHighlighter::new(),
             search: Search::new(),
+            diagnostics: Vec::new(),
+            hover_info: None,
+            completions: Vec::new(),
+            document_version: 0,
         }
     }
 
@@ -79,6 +92,10 @@ impl Editor {
         self.scroll_offset = 0;
         self.smooth_scroll = 0.0;
         self.horizontal_scroll = 0;
+        self.diagnostics.clear();
+        self.hover_info = None;
+        self.completions.clear();
+        self.document_version = 0;
 
         // Set up syntax highlighting based on file extension
         let language = Language::from_path(path);
@@ -1094,7 +1111,7 @@ impl Editor {
         });
 
         // Move cursor after the replacement
-        self.cursor.set_position(match_.start + replacement.len(), false);
+        self.cursor.set_position(match_.start + replacement.chars().count(), false);
 
         self.finish_edit();
 
@@ -1119,7 +1136,7 @@ impl Editor {
 
         self.begin_edit();
 
-        let replacement_len = replacement.len();
+        let replacement_char_count = replacement.chars().count();
         let mut offset: isize = 0;
 
         for m in &matches {
@@ -1148,7 +1165,7 @@ impl Editor {
             });
 
             // Update offset for subsequent replacements
-            offset += replacement_len as isize - m.len() as isize;
+            offset += replacement_char_count as isize - m.len() as isize;
         }
 
         let count = matches.len();
@@ -1197,6 +1214,78 @@ impl Editor {
         self.cursor.set_position(char_pos, false);
         self.scroll_to_cursor();
         true
+    }
+
+    // ==================== LSP Integration ====================
+
+    /// Returns the document version (increments on each change).
+    pub fn document_version(&self) -> i32 {
+        self.document_version
+    }
+
+    /// Increments the document version. Call after each text change.
+    pub fn increment_document_version(&mut self) {
+        self.document_version += 1;
+    }
+
+    /// Sets the diagnostics for this buffer.
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        self.diagnostics = diagnostics;
+    }
+
+    /// Returns the diagnostics for this buffer.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// Returns diagnostics for a specific line.
+    pub fn diagnostics_on_line(&self, line: usize) -> Vec<&Diagnostic> {
+        self.diagnostics.iter().filter(|d| d.on_line(line)).collect()
+    }
+
+    /// Returns the diagnostic at the given position, if any.
+    pub fn diagnostic_at(&self, line: usize, col: usize) -> Option<&Diagnostic> {
+        self.diagnostics.iter().find(|d| d.contains(line, col))
+    }
+
+    /// Clears all diagnostics.
+    pub fn clear_diagnostics(&mut self) {
+        self.diagnostics.clear();
+    }
+
+    /// Sets the hover information.
+    pub fn set_hover_info(&mut self, info: Option<HoverInfo>) {
+        self.hover_info = info;
+    }
+
+    /// Returns the current hover information.
+    pub fn hover_info(&self) -> Option<&HoverInfo> {
+        self.hover_info.as_ref()
+    }
+
+    /// Clears the hover information.
+    pub fn clear_hover_info(&mut self) {
+        self.hover_info = None;
+    }
+
+    /// Sets the completion items.
+    pub fn set_completions(&mut self, items: Vec<CompletionItem>) {
+        self.completions = items;
+    }
+
+    /// Returns the current completion items.
+    pub fn completions(&self) -> &[CompletionItem] {
+        &self.completions
+    }
+
+    /// Clears the completion items.
+    pub fn clear_completions(&mut self) {
+        self.completions.clear();
+    }
+
+    /// Returns true if there are active completions.
+    pub fn has_completions(&self) -> bool {
+        !self.completions.is_empty()
     }
 }
 

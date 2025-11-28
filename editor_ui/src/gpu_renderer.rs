@@ -22,6 +22,15 @@ pub struct Colors {
     pub search_bar_bg: [f32; 4],
     pub input_field_bg: [f32; 4],
     pub input_field_border: [f32; 4],
+    pub diagnostic_error: [f32; 4],
+    pub diagnostic_warning: [f32; 4],
+    pub diagnostic_info: [f32; 4],
+    pub diagnostic_hint: [f32; 4],
+    pub hover_bg: [f32; 4],
+    pub hover_border: [f32; 4],
+    pub completion_bg: [f32; 4],
+    pub completion_selected_bg: [f32; 4],
+    pub completion_border: [f32; 4],
 }
 
 impl Default for Colors {
@@ -41,6 +50,15 @@ impl Default for Colors {
             search_bar_bg: [0.059, 0.059, 0.071, 1.0], // Same as inactive tab
             input_field_bg: [0.102, 0.102, 0.122, 1.0], // Same as background
             input_field_border: [0.302, 0.302, 0.322, 1.0], // Light gray border
+            diagnostic_error: [0.937, 0.325, 0.314, 1.0],   // #EF5350 - Red
+            diagnostic_warning: [1.0, 0.757, 0.027, 1.0],   // #FFC107 - Amber
+            diagnostic_info: [0.259, 0.647, 0.961, 1.0],    // #42A5F5 - Blue
+            diagnostic_hint: [0.502, 0.502, 0.502, 1.0],    // #808080 - Gray
+            hover_bg: [0.15, 0.15, 0.18, 0.95],             // Dark background with slight transparency
+            hover_border: [0.3, 0.3, 0.35, 1.0],            // Subtle border
+            completion_bg: [0.12, 0.12, 0.15, 0.98],        // Slightly darker for completion
+            completion_selected_bg: [0.25, 0.35, 0.55, 1.0], // Blue highlight for selected
+            completion_border: [0.3, 0.3, 0.35, 1.0],       // Same as hover border
         }
     }
 }
@@ -488,6 +506,51 @@ impl GpuRenderer {
             self.draw_char(ch, x, y, color);
             x += self.atlas.char_width;
         }
+    }
+
+    /// Draws a squiggly underline (for diagnostics).
+    /// The underline is drawn at the bottom of the line height.
+    pub fn draw_squiggle(&mut self, x: f32, y: f32, width: f32, line_height: f32, color: [f32; 4]) {
+        let underline_y = y + line_height - 2.0;
+        let wave_height: f32 = 2.0;
+        let wave_period: f32 = 4.0;
+        let line_thickness: f32 = 1.5;
+
+        // Draw a series of small diagonal lines to create a squiggle effect
+        let mut current_x = x;
+        let mut going_up = true;
+
+        while current_x < x + width {
+            let segment_width = wave_period.min(x + width - current_x);
+            let x0 = current_x;
+            let x1 = current_x + segment_width;
+
+            let (y0, y1) = if going_up {
+                (underline_y + wave_height, underline_y)
+            } else {
+                (underline_y, underline_y + wave_height)
+            };
+
+            // Draw a small quad for the diagonal segment
+            // We'll approximate with a rectangle that covers the diagonal
+            self.rect_vertices.extend_from_slice(&[
+                Vertex { position: [x0, y0], tex_coords: [0.0, 0.0], color },
+                Vertex { position: [x1, y0 - line_thickness], tex_coords: [1.0, 0.0], color },
+                Vertex { position: [x1, y1], tex_coords: [1.0, 1.0], color },
+                Vertex { position: [x0, y0], tex_coords: [0.0, 0.0], color },
+                Vertex { position: [x1, y1], tex_coords: [1.0, 1.0], color },
+                Vertex { position: [x0, y1 + line_thickness], tex_coords: [0.0, 1.0], color },
+            ]);
+
+            current_x += segment_width;
+            going_up = !going_up;
+        }
+    }
+
+    /// Draws a simple underline (alternative to squiggle).
+    pub fn draw_underline(&mut self, x: f32, y: f32, width: f32, line_height: f32, color: [f32; 4]) {
+        let underline_y = y + line_height - 2.0;
+        self.draw_rect(x, underline_y, width, 2.0, color);
     }
 
     /// Returns the viewport dimensions.
